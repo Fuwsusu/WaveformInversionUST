@@ -1256,6 +1256,21 @@ for f_idx = 1:numel(fDATA)
         num_ls   = -real(gradient_img(:)'*search_dir(:));
         alpha_ls = num_ls / (den_ls + eps);
 
+        % PolarPhase 线搜索分母修正：
+        % 分子来自 PolarPhase 梯度，若直接复用 L2 的 dREC_SIM 二范数作为分母，
+        % 会导致相位/幅度混合量纲不匹配。这里在不改变现有流程的前提下，
+        % 通过 alpha_hv_cur 的加权平方和对分母做一次近似缩放修正。
+        if strcmpi(misfitType, 'PolarPhase')
+            dPhi_sq_accum = 0;
+            for elmt_idx = 1:numel(tx_include_cur)
+                dREC_elmt = dREC_SIM(elmt_idx, :).';
+                dPhi_sq_accum = dPhi_sq_accum + sum(abs(dREC_elmt).^2);
+            end
+            scale_pp  = (1 - alpha_hv_cur)^2 + alpha_hv_cur^2;
+            den_ls_pp = dPhi_sq_accum * scale_pp;
+            alpha_ls  = num_ls / (den_ls_pp + eps);
+        end
+
         sd_max      = max(abs(search_dir(:))) + eps;
         alpha_cap   = target_dv_per_iter / ((mean(VEL_ESTIM(:))^2) * sd_max + eps);
         alpha       = min(alpha_ls, alpha_cap);
