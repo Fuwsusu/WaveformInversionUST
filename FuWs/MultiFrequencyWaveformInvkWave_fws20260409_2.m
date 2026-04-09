@@ -61,6 +61,17 @@ frac_excl = 1/4;
 %           增大凸性盆地，抑制周期跳跃（参考 Neumann & Yang 2025）。
 misfitType = 'HV_polar';   % 'L2' | 'HV_polar'
 
+% ------------------ fws: 优化器设置（新增） ------------------
+% 用户反馈“更新太小、速度图几乎不变”时，可用CG而非纯梯度下降。
+% 这里统一启用非线性共轭梯度（PR+ / FR 截断），并保留步长安全夹紧：
+%   1) alpha_ls  : 线性化线搜索步长（与原L2流程一致）
+%   2) alpha_cap : 按期望 max|Δv| 估计的上限，避免一步过大导致发散
+% 最终 alpha = min(alpha_ls, alpha_cap)，兼顾“能动起来”与稳定性。
+optimizerType      = 'CG_PR_FR';  % 目前支持: 'CG_PR_FR'
+target_dv_per_iter = 1.5;         % 目标每步最大速度改变量 [m/s]（可调 0.5~3）
+alpha_floor        = 1e-8;        % 步长下限，避免数值退化为零步
+% --------------------------------------------------------------
+
 % alpha_hv：SoS 更新阶段的相位权重
 %   0.0 = 纯幅度（退化为 L2 幅度版）
 %   1.0 = 纯相位（对周期跳跃最鲁棒，但完全忽略幅度匹配）
@@ -1196,17 +1207,22 @@ for f_idx = 1:numel(fDATA)
         % gradient_img_prev = gradient_img;
 
         % Step 2: Compute New Conjugate Gradient Search Direction from Gradient
-        % fws: HV_polar 调试阶段临时禁用 CG 动量，避免"旧L2动量 + 新HV梯度"叠加失控
-        if strcmpi(misfitType, 'HV_polar')
-            beta = 0;
-        elseif do_reset_CG
+        % 使用 PR+ / FR 混合截断的非线性共轭梯度（NLCG）：
+        %   betaPR = g_k^T(g_k-g_{k-1}) / ||g_{k-1}||^2
+        %   betaFR = ||g_k||^2 / ||g_{k-1}||^2
+        %   beta   = min(max(betaPR,0), betaFR)
+        % 与纯最速下降(beta=0)相比，NLCG可在谷底方向累积“惯性”，提升有效更新幅度。
+        if do_reset_CG || ~strcmpi(optimizerType, 'CG_PR_FR')
             beta = 0;
         else
-            betaPR = (gradient_img(:)'*(gradient_img(:)-gradient_img_prev(:))) / ...
-                     (gradient_img_prev(:)'*gradient_img_prev(:));
-            betaFR = (gradient_img(:)'*gradient_img(:)) / ...
-                     (gradient_img_prev(:)'*gradient_img_prev(:));
-            beta = min(max(betaPR,0), betaFR);
+            den_cg = real(gradient_img_prev(:)'*gradient_img_prev(:));
+            if den_cg <= eps
+                beta = 0;
+            else
+                betaPR = real(gradient_img(:)'*(gradient_img(:)-gradient_img_prev(:))) / den_cg;
+                betaFR = real(gradient_img(:)'*gradient_img(:)) / den_cg;
+                beta   = min(max(betaPR,0), betaFR);
+            end
         end
         search_dir        = beta*search_dir - gradient_img;
         gradient_img_prev = gradient_img;
@@ -1236,25 +1252,15 @@ for f_idx = 1:numel(fDATA)
         % den = real(dREC_SIM(:)'*dREC_SIM(:));
         % alpha = -(gradient_img(:)'*search_dir(:)) / (den + eps(den));
 
-        % fws: HV_polar 梯度量纲（弧度）与 L2 phasor 扰动量纲不一致，
-        %      原 L2 线搜索会给出错误步长（通常高估 2~3 数量级）。
-        %      临时改用归一化固定步长调试：将 search_dir 按最大绝对值归一化，
-        %      再乘以 alpha_fix，使每步 max|Δv| ≈ 1~5 m/s。
-        %      待 HV_polar 收敛行为稳定后，可换回正确的 Gauss-Newton 线搜索。
-        %      alpha_fix_sos 经验起点：5e-5（保守），可向上调至 2e-4。
-        if strcmpi(misfitType, 'HV_polar')
-            alpha_fix_sos   = 8e-6;   % SoS 阶段固定步长（调整目标：max|Δv| ≈ 1~3 m/s）
-            alpha_fix_atten = 1e-5;   % Atten 阶段固定步长
-            sd_max = max(abs(search_dir(:))) + eps;
-            search_dir = search_dir / sd_max;   % 归一化：只让 alpha 控制更新尺度
-            if updateAttenuation
-                alpha = alpha_fix_atten;
-            else
-                alpha = alpha_fix_sos;
-            end
-        else
-            alpha = -(gradient_img(:)'*search_dir(:)) / (dREC_SIM(:)'*dREC_SIM(:));
-        end
+        % 统一线搜索：先做线性化步长，再按目标 max|Δv| 做上限夹紧。
+        den_ls   = real(dREC_SIM(:)'*dREC_SIM(:));
+        num_ls   = -real(gradient_img(:)'*search_dir(:));
+        alpha_ls = num_ls / (den_ls + eps);
+
+        sd_max      = max(abs(search_dir(:))) + eps;
+        alpha_cap   = target_dv_per_iter / ((mean(VEL_ESTIM(:))^2) * sd_max + eps);
+        alpha       = min(alpha_ls, alpha_cap);
+        alpha       = max(alpha, alpha_floor);
 
         % 可信度门控：根据 ΔΦ/τ/R 动态缩步与增强径向TV
         alpha_gate = 1.0;
