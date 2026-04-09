@@ -1344,6 +1344,19 @@ for f_idx = 1:numel(fDATA)
         prev_pred_drop = pred_drop_cur;
         prev_edge_contam = edge_contam_k;
 
+        % 迭代状态滚动到下一次
+        prev_phi_k     = phi_k;
+        prev_tau_k     = tau_k;
+        prev_ring_k    = ring_k;
+        prev_pred_drop = pred_drop_cur;
+        prev_edge_contam = edge_contam_k;
+
+        % 迭代状态滚动到下一次
+        prev_phi_k     = phi_k;
+        prev_tau_k     = tau_k;
+        prev_ring_k    = ring_k;
+        prev_pred_drop = pred_drop_cur;
+
         % Visualize coarse 
         % 频率/VE信息显示在 figure 窗口标题栏
         hfig = figure(1);
