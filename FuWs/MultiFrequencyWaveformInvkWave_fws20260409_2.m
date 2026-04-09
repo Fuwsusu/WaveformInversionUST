@@ -63,12 +63,12 @@ misfitType = 'HV_polar';   % 'L2' | 'HV_polar'
 
 % ------------------ fws: 优化器设置（新增） ------------------
 % 用户反馈“更新太小、速度图几乎不变”时，可用CG而非纯梯度下降。
-% 这里统一启用非线性共轭梯度（PR+ / FR 截断），并保留步长安全夹紧：
-%   1) alpha_ls  : 线性化线搜索步长（与原L2流程一致）
-%   2) alpha_cap : 按期望 max|Δv| 估计的上限，避免一步过大导致发散
-% 最终 alpha = min(alpha_ls, alpha_cap)，兼顾“能动起来”与稳定性。
+% 这里统一启用非线性共轭梯度（PR+ / FR 截断），并使用线性化线搜索步长：
+%   alpha_ls  : 由 Gauss-Newton 线性化推导得到（与原L2流程一致）
+%   alpha_floor: 步长下限，避免数值退化
+% 说明：不再做每步 max|Δv| 的硬夹紧，改为“更新后数值异常检测 + 回退缩步重试”。
 optimizerType      = 'CG_PR_FR';  % 目前支持: 'CG_PR_FR'
-target_dv_per_iter = 15;         % 目标每步最大速度改变量 [m/s]（可调 0.5~3）
+target_dv_per_iter = 15;         % 仅用于日志监控 max|Δv| 的参考量 [m/s]
 alpha_floor        = 1e-8;        % 步长下限，避免数值退化为零步
 % --------------------------------------------------------------
 
@@ -1252,15 +1252,12 @@ for f_idx = 1:numel(fDATA)
         % den = real(dREC_SIM(:)'*dREC_SIM(:));
         % alpha = -(gradient_img(:)'*search_dir(:)) / (den + eps(den));
 
-        % 统一线搜索：先做线性化步长，再按目标 max|Δv| 做上限夹紧。
+        % 统一线搜索：直接使用线性化步长（Gauss-Newton 近似）。
+        % 不再做 alpha_cap 硬限制，改为更新后极端值检测与回退缩步。
         den_ls   = real(dREC_SIM(:)'*dREC_SIM(:));
         num_ls   = -real(gradient_img(:)'*search_dir(:));
         alpha_ls = num_ls / (den_ls + eps);
-
-        sd_max      = max(abs(search_dir(:))) + eps;
-        alpha_cap   = target_dv_per_iter / ((mean(VEL_ESTIM(:))^2) * sd_max + eps);
-        alpha       = min(alpha_ls, alpha_cap);
-        alpha       = max(alpha, alpha_floor);
+        alpha    = max(alpha_ls, alpha_floor);
 
         % 可信度门控：根据 ΔΦ/τ/R 动态缩步与增强径向TV
         alpha_gate = 1.0;
@@ -1304,6 +1301,7 @@ for f_idx = 1:numel(fDATA)
         pred_drop_cur = -perc_step_size * alpha * real(gradient_img(:)'*search_dir(:));
         
         % Update slowness
+        SLOW_prev = SLOW_ESTIM;
         if updateAttenuation
             SI = sign(sign_conv) * imag(SLOW_ESTIM) + perc_step_size * alpha * search_dir;
             SLOW_ESTIM = real(SLOW_ESTIM) + 1i * sign(sign_conv) * SI;
@@ -1311,6 +1309,22 @@ for f_idx = 1:numel(fDATA)
             SLOW_ESTIM = SLOW_ESTIM + perc_step_size * alpha * search_dir;
         end
         VEL_ESTIM   = 1./real(SLOW_ESTIM);
+
+        % 数值安全检查：若出现非有限值或极端声速，回退并缩步重试
+        invalid_vel = any(~isfinite(VEL_ESTIM(:))) || ...
+                      (min(VEL_ESTIM(:)) < 1000) || (max(VEL_ESTIM(:)) > 2500);
+        if invalid_vel
+            warning('步长过大导致速度异常，回退并将 alpha 缩小 10 倍重试。');
+            alpha = max(alpha * 0.1, alpha_floor);
+            SLOW_ESTIM = SLOW_prev;
+            if updateAttenuation
+                SI = sign(sign_conv) * imag(SLOW_ESTIM) + perc_step_size * alpha * search_dir;
+                SLOW_ESTIM = real(SLOW_ESTIM) + 1i * sign(sign_conv) * SI;
+            else
+                SLOW_ESTIM = SLOW_ESTIM + perc_step_size * alpha * search_dir;
+            end
+            VEL_ESTIM = 1./real(SLOW_ESTIM);
+        end
         % 外环后处理回拉：在更新后直接抑制边界漂移（高频SoS阶段）
         edge_blend_eff = 0;
         if enableEdgeGuard && ~updateAttenuation && (fDATA(f_idx) >= f_edge_guard_start) && ~isempty(edge_ref_cur)
