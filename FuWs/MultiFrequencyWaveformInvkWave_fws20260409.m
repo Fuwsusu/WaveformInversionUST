@@ -168,6 +168,20 @@ lambda_polar_gate_boost = 1.25; % 环伪影增长时径向TV增强倍率
 lambda_polar_gate_max   = 3.00; % 径向TV最大增强上限（相对 lambda_polar）
 % -----------------------------------------------------------------------
 
+% ------------------ fws: 高频边界保护（抑制“中心污染外圈”） ------------------
+% 现象：高频阶段若低波数背景仍有偏差，中心高对比分量可能通过有限孔径/建模误差
+%      把更新能量“扩散”到外围背景，表现为外圈泛红/环纹。
+% 处理：
+%   1) 外环锚定正则（edge anchor）：把外环拉向低频参考，防止外圈被中心拖偏；
+%   2) 外环步长阻尼（edge step damping）：高频阶段对外环更新做软抑制。
+enableEdgeGuard    = true;
+f_edge_guard_start = 0.85e6;  % 从高频段起生效（可与 f_stage2_cutoff 对齐）
+edge_r_inner_ratio = 0.70;    % 外环保护起点（相对半径）
+edge_r_outer_ratio = 0.92;    % 外环保护终点（相对半径）
+lambda_edge_anchor = 2e-3;    % 外环锚定强度（相对归一化）
+edge_step_damp_max = 0.60;    % 外环最大步长衰减比例（0~1）
+% -----------------------------------------------------------------------
+
 % ------------------ GIF 保存 ------------------
 % saveGIF=true 时，每次迭代后截取 figure(99) 帧并追加到 GIF
 % 用于观察环状伪影从何频率段开始出现、VE 如何影响其演化
@@ -738,6 +752,10 @@ Rmax = max(R_grid(:));
 ring_bg_inner_ratio = 0.65;
 ring_bg_outer_ratio = 0.92;
 ring_bg_mask = (R_grid >= ring_bg_inner_ratio*Rmax) & (R_grid <= ring_bg_outer_ratio*Rmax);
+% 外环保护软掩膜（0~1）：中心0，外圈逐步增加到1
+edge_guard_mask = (R_grid - edge_r_inner_ratio*Rmax) ./ ...
+                  max((edge_r_outer_ratio - edge_r_inner_ratio)*Rmax, eps);
+edge_guard_mask = min(max(edge_guard_mask, 0), 1);
 
 % 粗网格迭代结果
 VEL_ESTIM_ITER   = zeros(Nyi, Nxi, Niter);
@@ -751,6 +769,8 @@ R_RING_ITER      = nan(1, Niter);
 GAMMA_TRUST_ITER = nan(1, Niter);
 ALPHA_GATE_ITER  = ones(1, Niter);
 LAMBDA_POLAR_EFF_ITER = nan(1, Niter);
+LAMBDA_EDGE_EFF_ITER  = nan(1, Niter);
+EDGE_DAMP_EFF_ITER    = nan(1, Niter);
 
 %% ---------- 用户控制：迭代执行选项 ----------
 runAllIterations    = false;
@@ -1125,6 +1145,26 @@ for f_idx = 1:numel(fDATA)
         end
         % -----------------------------------------------------------------------
 
+        % [新增] ---- 高频外环锚定（边界保护）----
+        % 仅在高频SoS阶段启用：抑制中心结构误差向背景外圈扩散
+        lambda_edge_eff = 0;
+        if enableEdgeGuard && ~updateAttenuation && (fDATA(f_idx) >= f_edge_guard_start)
+            if stage2_ref_saved
+                edge_ref = VEL_stage2_ref;   % 优先使用中频末参考
+            elseif stage1_ref_saved
+                edge_ref = VEL_stage1_ref;
+            else
+                edge_ref = VEL_INIT;
+            end
+            edge_diff = (VEL_ESTIM - edge_ref) .* edge_guard_mask;
+            edge_scale = max(abs(edge_diff(:))) + eps;
+            grad_scale_edge = max(abs(gradient_img(:))) + eps;
+            lambda_edge_eff = lambda_edge_anchor * (f_edge_guard_start / fDATA(f_idx))^2;
+            edge_anchor_reg = -lambda_edge_eff * grad_scale_edge * (edge_diff / edge_scale);
+            gradient_img = gradient_img + edge_anchor_reg;
+        end
+        % -----------------------------------------------------------------------
+
         % Remove Ringing from Gradient Image
         gradient_img = ringingRemovalFilt(xi_original, yi_original, ...
             gradient_img, c0, fDATA(f_idx), cutoff, ord);
@@ -1220,11 +1260,21 @@ for f_idx = 1:numel(fDATA)
         end
         alpha = alpha * alpha_gate;
 
+        % 高频外环步长阻尼：减少外围被中心结构“带跑”
+        edge_damp_eff = 0;
+        if enableEdgeGuard && ~updateAttenuation && (fDATA(f_idx) >= f_edge_guard_start)
+            edge_damp_eff = edge_step_damp_max;
+            search_dir = search_dir .* (1 - edge_damp_eff * edge_guard_mask);
+        end
+
         % fws: 调试 —— 打印本轮最大速度更新量，确认步长合理
         % Δs = α·search_dir → Δv ≈ v² · Δs（一阶近似）
         delta_s_max  = perc_step_size * alpha * max(abs(search_dir(:)));
         delta_v_max  = mean(VEL_ESTIM(:))^2 * delta_s_max;
         fprintf(['  Φ=%.3e | ΔΦ=% .3e | τ=%.3eus | R=%.3f | γ=% .3f' ...
+                 ' | λpolar=%.2e λedge=%.2e damp=%.2f | alpha=%.2e(gate=%.2f) | max|Δv|≈%.3f m/s\n'], ...
+            phi_k, delta_phi_k, tau_k*1e6, ring_k, gamma_k, lambda_polar_eff, ...
+            lambda_edge_eff, edge_damp_eff, alpha, alpha_gate, delta_v_max);
                  ' | λpolar_eff=%.2e | alpha=%.2e(gate=%.2f) | max|Δv|≈%.3f m/s\n'], ...
             phi_k, delta_phi_k, tau_k*1e6, ring_k, gamma_k, lambda_polar_eff, ...
             alpha, alpha_gate, delta_v_max);
@@ -1255,6 +1305,8 @@ for f_idx = 1:numel(fDATA)
         GAMMA_TRUST_ITER(iter)     = gamma_k;
         ALPHA_GATE_ITER(iter)      = alpha_gate;
         LAMBDA_POLAR_EFF_ITER(iter)= lambda_polar_eff;
+        LAMBDA_EDGE_EFF_ITER(iter) = lambda_edge_eff;
+        EDGE_DAMP_EFF_ITER(iter)   = edge_damp_eff;
         savedIters(end+1)          = iter; %#ok<SAGROW>
 
         % 迭代状态滚动到下一次
@@ -1452,6 +1504,8 @@ if ~isempty(savedIters)
     GAMMA_TRUST_ITER = GAMMA_TRUST_ITER(savedIters);
     ALPHA_GATE_ITER  = ALPHA_GATE_ITER(savedIters);
     LAMBDA_POLAR_EFF_ITER = LAMBDA_POLAR_EFF_ITER(savedIters);
+    LAMBDA_EDGE_EFF_ITER  = LAMBDA_EDGE_EFF_ITER(savedIters);
+    EDGE_DAMP_EFF_ITER    = EDGE_DAMP_EFF_ITER(savedIters);
 end
 
 % Save coarse result
@@ -1466,6 +1520,7 @@ save(filename_results, '-v7.3', ...
     'VEL_ESTIM_ITER','ATTEN_ESTIM_ITER','GRAD_IMG_ITER','SEARCH_DIR_ITER', ...
     'PHI_ITER','DELTA_PHI_ITER','TAU_SHIFT_ITER','R_RING_ITER', ...
     'GAMMA_TRUST_ITER','ALPHA_GATE_ITER','LAMBDA_POLAR_EFF_ITER', ...
+    'LAMBDA_EDGE_EFF_ITER','EDGE_DAMP_EFF_ITER', ...
     'savedIters', 'enableVirtualElements', 'useVirtualTx', 'orig_numElements', ...
     'virtualElementsMode', 'exclMode','frac_excl', ...
     'VE_freqMode','VE_freqThresh','VE_manualFlags','VE_flags', ...
@@ -1479,6 +1534,9 @@ save(filename_results, '-v7.3', ...
     'enableTrustGate','phi_small_drop_ratio','tau_rise_ratio','ring_rise_ratio', ...
     'alpha_gate_badfit','alpha_gate_ringgrowth', ...
     'lambda_polar_gate_boost','lambda_polar_gate_max', ...
+    'enableEdgeGuard','f_edge_guard_start', ...
+    'edge_r_inner_ratio','edge_r_outer_ratio', ...
+    'lambda_edge_anchor','edge_step_damp_max', ...
     'ring_bg_inner_ratio','ring_bg_outer_ratio', ...
     'mainLoopElapsedSec', 'scriptElapsedSec');
 
