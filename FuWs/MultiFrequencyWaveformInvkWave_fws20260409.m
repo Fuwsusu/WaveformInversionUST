@@ -65,7 +65,7 @@ misfitType = 'HV_polar';   % 'L2' | 'HV_polar'
 %   0.0 = 纯幅度（退化为 L2 幅度版）
 %   1.0 = 纯相位（对周期跳跃最鲁棒，但完全忽略幅度匹配）
 %   建议起点：0.7（强调相位约束声速；消融可测试 [0.3, 0.5, 0.7, 0.9]）
-alpha_hv = 0.7;
+alpha_hv = 0.5;
 
 % alpha_hv_atten：衰减更新阶段的相位权重
 %   衰减主要由幅度约束，应降低相位权重；建议起点：0.3
@@ -91,7 +91,7 @@ beta_ve = 0.9;
 %            值越小→更接近真实照明补偿→可能放大低照明区的噪声。
 %            建议起点：0.05，可测试 [0.01, 0.05, 0.10, 0.20]
 enableIllumComp = true;    % true=开启照明补偿；false=关闭（退回标准梯度）
-eps_illum       = 0.20;    % 照明补偿正则化参数（相对归一化照明的截断值）
+eps_illum       = 0.10;    % 照明补偿正则化参数（相对归一化照明的截断值）
 % ----------------------------------------------------------------
 
 % [修改] ------------------ fws: 三阶段低频先验正则化（方向E）------------------
@@ -1243,7 +1243,7 @@ for f_idx = 1:numel(fDATA)
         %      待 HV_polar 收敛行为稳定后，可换回正确的 Gauss-Newton 线搜索。
         %      alpha_fix_sos 经验起点：5e-5（保守），可向上调至 2e-4。
         if strcmpi(misfitType, 'HV_polar')
-            alpha_fix_sos   = 3e-6;   % SoS 阶段固定步长（调整目标：max|Δv| ≈ 1~3 m/s）
+            alpha_fix_sos   = 8e-6;   % SoS 阶段固定步长（调整目标：max|Δv| ≈ 1~3 m/s）
             alpha_fix_atten = 1e-5;   % Atten 阶段固定步长
             sd_max = max(abs(search_dir(:))) + eps;
             search_dir = search_dir / sd_max;   % 归一化：只让 alpha 控制更新尺度
