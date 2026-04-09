@@ -149,6 +149,25 @@ lambda_polar   = 2e-3;     % 径向TV强度（归一化后：2.0%数据梯度；
 eps_polar_reg  = 1e-3;     % Huber平滑参数（建议 1e-3~1e-2）
 % -----------------------------------------------------------------------
 
+% ------------------ fws: 高频更新可信度监控与门控 ------------------
+% 目标：避免“高频把低波数背景误差投影到高波数环状伪影”。
+% 核心监控量：
+%   1) ΔΦ_k = Φ_{k-1} - Φ_k：数据失配是否真实下降
+%   2) τ_k  ：平均时移残差（由相位残差换算）是否继续下降
+%   3) R_k  ：背景环带的径向伪影比（越大越像同心环）
+% 门控策略：
+%   - 若 ΔΦ_k <= 0 或 τ_k 上升：缩小步长（alpha_gate）
+%   - 若 ΔΦ_k 很小且 R_k 上升：进一步缩步长 + 增强径向TV（lambda_polar_gate）
+enableTrustGate        = true;
+phi_small_drop_ratio   = 1e-3;  % “失配下降很小”的相对阈值
+tau_rise_ratio         = 1.01;  % τ_k > 1.01*τ_{k-1} 视为上升
+ring_rise_ratio        = 1.02;  % R_k > 1.02*R_{k-1} 视为环伪影增强
+alpha_gate_badfit      = 0.50;  % 拟合退化时步长缩放
+alpha_gate_ringgrowth  = 0.70;  % 环伪影增长时额外缩放
+lambda_polar_gate_boost = 1.25; % 环伪影增长时径向TV增强倍率
+lambda_polar_gate_max   = 3.00; % 径向TV最大增强上限（相对 lambda_polar）
+% -----------------------------------------------------------------------
+
 % ------------------ GIF 保存 ------------------
 % saveGIF=true 时，每次迭代后截取 figure(99) 帧并追加到 GIF
 % 用于观察环状伪影从何频率段开始出现、VE 如何影响其演化
@@ -277,6 +296,7 @@ dxi  = 0.3e-3; xmax = 120e-3;
 xi   = -xmax:dxi:xmax; yi = xi;
 Nxi  = numel(xi); Nyi = numel(yi);
 [Xi, Yi] = meshgrid(xi, yi);
+R_grid = sqrt(Xi.^2 + Yi.^2);
 % Discretize transducer ring onto grid (coarse grid)
 x_circ = transducerPositionsX;
 y_circ = transducerPositionsY;
@@ -713,11 +733,24 @@ c0 = mean(VEL_ESTIM(:)); cutoff = 0.75; ord = Inf; % Parameters for Ringing Remo
 % Values to Save at Each Iteration
 Niter = sum(niterSoSPerFreq) + sum(niterAttenPerFreq);
 
+% 背景环带（用于环伪影比 R_k 统计）：避开中心结构与最外层边界/PML
+Rmax = max(R_grid(:));
+ring_bg_inner_ratio = 0.65;
+ring_bg_outer_ratio = 0.92;
+ring_bg_mask = (R_grid >= ring_bg_inner_ratio*Rmax) & (R_grid <= ring_bg_outer_ratio*Rmax);
+
 % 粗网格迭代结果
 VEL_ESTIM_ITER   = zeros(Nyi, Nxi, Niter);
 ATTEN_ESTIM_ITER = zeros(Nyi, Nxi, Niter);
 GRAD_IMG_ITER    = zeros(Nyi, Nxi, Niter);
 SEARCH_DIR_ITER  = zeros(Nyi, Nxi, Niter);
+PHI_ITER         = nan(1, Niter);
+DELTA_PHI_ITER   = nan(1, Niter);
+TAU_SHIFT_ITER   = nan(1, Niter);
+R_RING_ITER      = nan(1, Niter);
+GAMMA_TRUST_ITER = nan(1, Niter);
+ALPHA_GATE_ITER  = ones(1, Niter);
+LAMBDA_POLAR_EFF_ITER = nan(1, Niter);
 
 %% ---------- 用户控制：迭代执行选项 ----------
 runAllIterations    = false;
@@ -731,6 +764,10 @@ prev_VE_flag = false;   % 用于检测跨频率套装切换
 % stage2_ref_saved：阶段2→3边界是否已保存参考（阶段3使用此参考约束）
 stage1_ref_saved = false;
 stage2_ref_saved = false;
+prev_phi_k       = nan;
+prev_tau_k       = nan;
+prev_ring_k      = nan;
+prev_pred_drop   = nan;
 % -----------------------------------------------
 
 %% ---------- 路径 & GIF 初始化（主循环前统一定义）----------
@@ -813,6 +850,10 @@ for f_idx = 1:numel(fDATA)
         if do_reset_CG
             search_dir        = zeros(Nyi, Nxi);
             gradient_img_prev = zeros(Nyi, Nxi);
+            prev_phi_k        = nan;
+            prev_tau_k        = nan;
+            prev_ring_k       = nan;
+            prev_pred_drop    = nan;
         end
 
         if iter_f_idx == 1
@@ -873,6 +914,9 @@ for f_idx = 1:numel(fDATA)
         % Build Adjoint Sources
         scaling = zeros(numel(tx_include_cur), 1);
         ADJ_SRC = zeros(Nyi, Nxi, numel(tx_include_cur));
+        phi_k_accum = 0;
+        tau_k_accum = 0;
+        tau_k_count = 0;
 
         for elmt_idx = 1:numel(tx_include_cur)
             WVFIELD_elmt = WVFIELD(:,:,elmt_idx);
@@ -921,6 +965,11 @@ for f_idx = 1:numel(fDATA)
                 otherwise
                     error('Unknown misfitType: %s. Use ''L2'' or ''HV_polar''.', misfitType);
             end
+            phi_k_accum = phi_k_accum + sum(abs(residual).^2);
+            % 走时残差近似：单频相位差换算时移 Δt = |Δφ|/(2πf)
+            dphi_tau = angle(p_sim_sc .* conj(REC_all));
+            tau_k_accum = tau_k_accum + sum(abs(dphi_tau) / (2*pi*fDATA(f_idx)));
+            tau_k_count = tau_k_count + numel(dphi_tau);
 
             ADJ_SRC_elmt = zeros(Nyi, Nxi);
 
@@ -932,6 +981,22 @@ for f_idx = 1:numel(fDATA)
             ADJ_SRC_elmt(idx_all) = w_channel .* residual;
 
             ADJ_SRC(:,:,elmt_idx) = ADJ_SRC_elmt;
+        end
+
+        % ---------- 可信度监控量（数据一致性 + 环伪影趋势） ----------
+        phi_k = real(phi_k_accum) / max(tau_k_count,1);
+        tau_k = tau_k_accum / max(tau_k_count,1);
+
+        if ~isnan(prev_phi_k)
+            delta_phi_k = prev_phi_k - phi_k;
+        else
+            delta_phi_k = nan;
+        end
+
+        if ~isnan(delta_phi_k) && ~isnan(prev_pred_drop) && abs(prev_pred_drop) > eps
+            gamma_k = delta_phi_k / prev_pred_drop;  % 实际下降 / 预测下降
+        else
+            gamma_k = nan;
         end
 
         % Backproject error
@@ -1019,6 +1084,8 @@ for f_idx = 1:numel(fDATA)
         % 相对归一化：同方向F，消除 div_r 量纲 [1/m] 与 gradient_img 不匹配的问题。
         %   lambda_polar 此版本设为 2e-3（与方向F同幅度，协同抑制同心环）。
         % enablePolarReg=false 时完全跳过，方便消融对比。
+        grad_radial = [];
+        ring_k      = nan;
         if enablePolarReg
             % 计算极坐标径向单位向量（Xi, Yi 来自成像网格 meshgrid，全程有效）
             R_pol  = sqrt(Xi.^2 + Yi.^2) + eps;   % 到中心距离，加 eps 防零除
@@ -1037,9 +1104,24 @@ for f_idx = 1:numel(fDATA)
             [dpx_pol_x, ~] = gradient(px_pol, dxi_original, dxi_original);
             [~, dpy_pol_y] = gradient(py_pol, dxi_original, dxi_original);
             div_r          = dpx_pol_x + dpy_pol_y;                   % 径向TV散度 [1/m]
+            grad_mag       = sqrt(gx_tv.^2 + gy_tv.^2);
+            num_ring       = mean(abs(grad_radial(ring_bg_mask)), 'omitnan');
+            den_ring       = mean(grad_mag(ring_bg_mask), 'omitnan') + eps;
+            ring_k         = num_ring / den_ring;
             grad_scale_pol = max(abs(gradient_img(:))) + eps;         % 数据梯度幅值锚点（含前序正则化）
             div_r_scale    = max(abs(div_r(:))) + eps;                 % 径向TV散度幅值锚点
-            gradient_img   = gradient_img + lambda_polar * grad_scale_pol * (-div_r / div_r_scale);
+            lambda_polar_eff = lambda_polar;
+            if enableTrustGate && ~isnan(delta_phi_k) && ~isnan(prev_ring_k)
+                small_drop = (delta_phi_k < phi_small_drop_ratio * max(prev_phi_k, eps));
+                ring_rise  = ~isnan(ring_k) && (ring_k > ring_rise_ratio * prev_ring_k);
+                if small_drop && ring_rise
+                    lambda_polar_eff = min(lambda_polar * lambda_polar_gate_max, ...
+                        lambda_polar * lambda_polar_gate_boost);
+                end
+            end
+            gradient_img   = gradient_img + lambda_polar_eff * grad_scale_pol * (-div_r / div_r_scale);
+        else
+            lambda_polar_eff = 0;
         end
         % -----------------------------------------------------------------------
 
@@ -1122,11 +1204,33 @@ for f_idx = 1:numel(fDATA)
             alpha = -(gradient_img(:)'*search_dir(:)) / (dREC_SIM(:)'*dREC_SIM(:));
         end
 
+        % 可信度门控：根据 ΔΦ/τ/R 动态缩步与增强径向TV
+        alpha_gate = 1.0;
+        if enableTrustGate && ~isnan(delta_phi_k)
+            bad_fit = (delta_phi_k <= 0);
+            tau_rise = ~isnan(prev_tau_k) && (tau_k > tau_rise_ratio * prev_tau_k);
+            small_drop = (delta_phi_k < phi_small_drop_ratio * max(prev_phi_k, eps));
+            ring_rise = ~isnan(prev_ring_k) && ~isnan(ring_k) && (ring_k > ring_rise_ratio * prev_ring_k);
+            if bad_fit || tau_rise
+                alpha_gate = min(alpha_gate, alpha_gate_badfit);
+            end
+            if small_drop && ring_rise
+                alpha_gate = min(alpha_gate, alpha_gate_ringgrowth);
+            end
+        end
+        alpha = alpha * alpha_gate;
+
         % fws: 调试 —— 打印本轮最大速度更新量，确认步长合理
         % Δs = α·search_dir → Δv ≈ v² · Δs（一阶近似）
         delta_s_max  = perc_step_size * alpha * max(abs(search_dir(:)));
         delta_v_max  = mean(VEL_ESTIM(:))^2 * delta_s_max;
-        fprintf('  alpha=%.2e | max|Δs|=%.2e | max|Δv|≈%.3f m/s\n', alpha, delta_s_max, delta_v_max);
+        fprintf(['  Φ=%.3e | ΔΦ=% .3e | τ=%.3eus | R=%.3f | γ=% .3f' ...
+                 ' | λpolar_eff=%.2e | alpha=%.2e(gate=%.2f) | max|Δv|≈%.3f m/s\n'], ...
+            phi_k, delta_phi_k, tau_k*1e6, ring_k, gamma_k, lambda_polar_eff, ...
+            alpha, alpha_gate, delta_v_max);
+
+        % 本步的“预测下降”供下一步计算 γ_{k+1}
+        pred_drop_cur = -perc_step_size * alpha * real(gradient_img(:)'*search_dir(:));
         
         % Update slowness
         if updateAttenuation
@@ -1144,7 +1248,20 @@ for f_idx = 1:numel(fDATA)
         ATTEN_ESTIM_ITER(:,:,iter) = ATTEN_ESTIM;
         GRAD_IMG_ITER(:,:,iter)    = gradient_img;
         SEARCH_DIR_ITER(:,:,iter)  = search_dir;
+        PHI_ITER(iter)             = phi_k;
+        DELTA_PHI_ITER(iter)       = delta_phi_k;
+        TAU_SHIFT_ITER(iter)       = tau_k;
+        R_RING_ITER(iter)          = ring_k;
+        GAMMA_TRUST_ITER(iter)     = gamma_k;
+        ALPHA_GATE_ITER(iter)      = alpha_gate;
+        LAMBDA_POLAR_EFF_ITER(iter)= lambda_polar_eff;
         savedIters(end+1)          = iter; %#ok<SAGROW>
+
+        % 迭代状态滚动到下一次
+        prev_phi_k     = phi_k;
+        prev_tau_k     = tau_k;
+        prev_ring_k    = ring_k;
+        prev_pred_drop = pred_drop_cur;
 
         % Visualize coarse 
         % 频率/VE信息显示在 figure 窗口标题栏
@@ -1328,6 +1445,13 @@ if ~isempty(savedIters)
     ATTEN_ESTIM_ITER = ATTEN_ESTIM_ITER(:,:,savedIters);
     GRAD_IMG_ITER    = GRAD_IMG_ITER(:,:,savedIters);
     SEARCH_DIR_ITER  = SEARCH_DIR_ITER(:,:,savedIters);
+    PHI_ITER         = PHI_ITER(savedIters);
+    DELTA_PHI_ITER   = DELTA_PHI_ITER(savedIters);
+    TAU_SHIFT_ITER   = TAU_SHIFT_ITER(savedIters);
+    R_RING_ITER      = R_RING_ITER(savedIters);
+    GAMMA_TRUST_ITER = GAMMA_TRUST_ITER(savedIters);
+    ALPHA_GATE_ITER  = ALPHA_GATE_ITER(savedIters);
+    LAMBDA_POLAR_EFF_ITER = LAMBDA_POLAR_EFF_ITER(savedIters);
 end
 
 % Save coarse result
@@ -1340,6 +1464,8 @@ save(filename_results, '-v7.3', ...
     'VEL_ESTIM_FINAL_NOPP','ATTEN_ESTIM_FINAL_NOPP', ...
     'fDATA','niterAttenPerFreq','niterSoSPerFreq', ...
     'VEL_ESTIM_ITER','ATTEN_ESTIM_ITER','GRAD_IMG_ITER','SEARCH_DIR_ITER', ...
+    'PHI_ITER','DELTA_PHI_ITER','TAU_SHIFT_ITER','R_RING_ITER', ...
+    'GAMMA_TRUST_ITER','ALPHA_GATE_ITER','LAMBDA_POLAR_EFF_ITER', ...
     'savedIters', 'enableVirtualElements', 'useVirtualTx', 'orig_numElements', ...
     'virtualElementsMode', 'exclMode','frac_excl', ...
     'VE_freqMode','VE_freqThresh','VE_manualFlags','VE_flags', ...
@@ -1350,6 +1476,10 @@ save(filename_results, '-v7.3', ...
     'stage1_ref_saved', 'stage2_ref_saved', ...
     'enableTV', 'lambda_tv', 'eps_tv', ...
     'enablePolarReg', 'lambda_polar', 'eps_polar_reg', ...
+    'enableTrustGate','phi_small_drop_ratio','tau_rise_ratio','ring_rise_ratio', ...
+    'alpha_gate_badfit','alpha_gate_ringgrowth', ...
+    'lambda_polar_gate_boost','lambda_polar_gate_max', ...
+    'ring_bg_inner_ratio','ring_bg_outer_ratio', ...
     'mainLoopElapsedSec', 'scriptElapsedSec');
 
 % [修改] 三阶段参考模型追加保存（变量存在时才追加，避免未进入对应阶段时报错）
