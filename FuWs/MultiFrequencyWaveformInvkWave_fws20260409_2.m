@@ -92,6 +92,10 @@ beta_ve = 0.9;
 %            建议起点：0.05，可测试 [0.01, 0.05, 0.10, 0.20]
 enableIllumComp = true;    % true=开启照明补偿；false=关闭（退回标准梯度）
 eps_illum       = 0.10;    % 照明补偿正则化参数（相对归一化照明的截断值）
+% 高频照明补偿防环策略：高频可禁用补偿，或使用更保守截断
+enableIllumCompHighFreq = false;  % false=高频SoS阶段关闭illum补偿
+f_illum_disable         = 0.85e6; % 高频判据
+eps_illum_hf            = 0.20;   % 若高频仍启用illum，使用更大截断
 % ----------------------------------------------------------------
 
 % [修改] ------------------ fws: 三阶段低频先验正则化（方向E）------------------
@@ -183,7 +187,22 @@ edge_step_damp_max = 0.60;    % 外环最大步长衰减比例（0~1）
 edge_blend_base    = 0.08;    % 后处理外环回拉比例（每步）
 edge_blend_max     = 0.25;    % 后处理外环回拉上限
 edge_contam_rise_ratio = 1.03;% 外环污染判据（较上一步上升）
+edge_contam_rise_need_count = 2; % 至少连续2步上升才触发增强
+edge_blend_ema_alpha = 0.40;      % edge_blend_eff 的EMA平滑系数
 % -----------------------------------------------------------------------
+
+% ------------------ fws: HV_polar 高频步长策略 ------------------
+% 避免 search_dir 全局归一化导致外圈相对更新偏大
+normalize_search_dir_hv = false; % true=沿用旧逻辑；false=保留方向相对比例
+enableHV_CG             = true;  % true=HV_polar 下启用CG动量
+hv_beta_max             = 0.90;  % 限制CG动量，避免失控
+hv_alpha_mode           = 'line_search'; % 'line_search' | 'fixed'
+hv_alpha_scale          = 0.25;  % HV线搜索缩放（保守）
+hv_alpha_min            = 2e-6;  % HV步长下限
+hv_alpha_max            = 2e-5;  % HV步长上限
+alpha_fix_sos_hv        = 1.2e-5;% HV固定步长（仅 fixed 模式用）
+alpha_fix_atten_hv      = 8e-6;  % HV衰减步长（仅 fixed 模式用）
+% ----------------------------------------------------------------
 
 % ------------------ GIF 保存 ------------------
 % saveGIF=true 时，每次迭代后截取 figure(99) 帧并追加到 GIF
@@ -795,6 +814,8 @@ prev_tau_k       = nan;
 prev_ring_k      = nan;
 prev_pred_drop   = nan;
 prev_edge_contam = nan;
+prev_edge_blend_eff = edge_blend_base;
+edge_contam_rise_streak = 0;
 % -----------------------------------------------
 
 %% ---------- 路径 & GIF 初始化（主循环前统一定义）----------
@@ -882,6 +903,8 @@ for f_idx = 1:numel(fDATA)
             prev_ring_k       = nan;
             prev_pred_drop    = nan;
             prev_edge_contam  = nan;
+            prev_edge_blend_eff = edge_blend_base;
+            edge_contam_rise_streak = 0;
         end
 
         if iter_f_idx == 1
@@ -1040,14 +1063,22 @@ for f_idx = 1:numel(fDATA)
         % 用各发射源正向波场强度之和估计伪Hessian对角，均衡稀疏阵角向不均匀照明。
         % 对梯度做归一化预条件后再做Ringing去除，使环状照明偏差在进入CG前已被修正。
         % enableIllumComp=false 时完全跳过，退回标准梯度，方便消融对比。
-        if enableIllumComp
+        doIllumComp = enableIllumComp;
+        if doIllumComp && ~updateAttenuation && (fDATA(f_idx) >= f_illum_disable) && ~enableIllumCompHighFreq
+            doIllumComp = false; % 高频SoS阶段关闭illum补偿，抑制角向空洞放大
+        end
+        if doIllumComp
             illum = zeros(Nyi, Nxi);
             for elmt_idx = 1:numel(tx_include_cur)
                 illum = illum + abs(WVFIELD(:,:,elmt_idx)).^2;
             end
             % 归一化到 [0,1]，用 eps_illum 截断防止低照明区除零放大噪声
             illum_norm   = illum / (max(illum(:)) + eps);
-            gradient_img = gradient_img ./ (illum_norm + eps_illum);
+            eps_illum_eff = eps_illum;
+            if ~updateAttenuation && (fDATA(f_idx) >= f_illum_disable)
+                eps_illum_eff = max(eps_illum_hf, eps_illum);
+            end
+            gradient_img = gradient_img ./ (illum_norm + eps_illum_eff);
         end
 
         % [修改] ---- 三阶段低频先验正则化梯度项（方向E）----
@@ -1197,9 +1228,7 @@ for f_idx = 1:numel(fDATA)
 
         % Step 2: Compute New Conjugate Gradient Search Direction from Gradient
         % fws: HV_polar 调试阶段临时禁用 CG 动量，避免"旧L2动量 + 新HV梯度"叠加失控
-        if strcmpi(misfitType, 'HV_polar')
-            beta = 0;
-        elseif do_reset_CG
+        if do_reset_CG
             beta = 0;
         else
             betaPR = (gradient_img(:)'*(gradient_img(:)-gradient_img_prev(:))) / ...
@@ -1207,6 +1236,13 @@ for f_idx = 1:numel(fDATA)
             betaFR = (gradient_img(:)'*gradient_img(:)) / ...
                      (gradient_img_prev(:)'*gradient_img_prev(:));
             beta = min(max(betaPR,0), betaFR);
+            if strcmpi(misfitType, 'HV_polar')
+                if ~enableHV_CG
+                    beta = 0;
+                else
+                    beta = min(beta, hv_beta_max);
+                end
+            end
         end
         search_dir        = beta*search_dir - gradient_img;
         gradient_img_prev = gradient_img;
@@ -1243,14 +1279,21 @@ for f_idx = 1:numel(fDATA)
         %      待 HV_polar 收敛行为稳定后，可换回正确的 Gauss-Newton 线搜索。
         %      alpha_fix_sos 经验起点：5e-5（保守），可向上调至 2e-4。
         if strcmpi(misfitType, 'HV_polar')
-            alpha_fix_sos   = 8e-6;   % SoS 阶段固定步长（调整目标：max|Δv| ≈ 1~3 m/s）
-            alpha_fix_atten = 1e-5;   % Atten 阶段固定步长
-            sd_max = max(abs(search_dir(:))) + eps;
-            search_dir = search_dir / sd_max;   % 归一化：只让 alpha 控制更新尺度
-            if updateAttenuation
-                alpha = alpha_fix_atten;
+            if normalize_search_dir_hv
+                sd_max = max(abs(search_dir(:))) + eps;
+                search_dir = search_dir / sd_max;   % 仅在需要时启用
+            end
+            if strcmpi(hv_alpha_mode, 'line_search')
+                den_hv   = real(dREC_SIM(:)'*dREC_SIM(:));
+                alpha_ls = -(real(gradient_img(:)'*search_dir(:))) / (den_hv + eps);
+                alpha    = hv_alpha_scale * alpha_ls;
+                alpha    = min(max(alpha, hv_alpha_min), hv_alpha_max);
             else
-                alpha = alpha_fix_sos;
+                if updateAttenuation
+                    alpha = alpha_fix_atten_hv;
+                else
+                    alpha = alpha_fix_sos_hv;
+                end
             end
         else
             alpha = -(gradient_img(:)'*search_dir(:)) / (dREC_SIM(:)'*dREC_SIM(:));
@@ -1278,6 +1321,11 @@ for f_idx = 1:numel(fDATA)
             edge_damp_eff = edge_step_damp_max;
             if ~isnan(edge_contam_k) && ~isnan(prev_edge_contam) && ...
                     (edge_contam_k > edge_contam_rise_ratio * prev_edge_contam)
+                edge_contam_rise_streak = edge_contam_rise_streak + 1;
+            else
+                edge_contam_rise_streak = 0;
+            end
+            if edge_contam_rise_streak >= edge_contam_rise_need_count
                 % 外环污染继续上升时，额外增强阻尼
                 edge_damp_eff = min(0.90, edge_damp_eff * 1.20);
             end
@@ -1290,9 +1338,9 @@ for f_idx = 1:numel(fDATA)
         delta_v_max  = mean(VEL_ESTIM(:))^2 * delta_s_max;
         fprintf(['  Φ=%.3e | ΔΦ=% .3e | τ=%.3eus | R=%.3f | γ=% .3f' ...
                  ' | EdgeContam=%.3f λpolar=%.2e λedge=%.2e damp=%.2f' ...
-                 ' | alpha=%.2e(gate=%.2f) | max|Δv|≈%.3f m/s\n'], ...
+                 ' | beta=%.3f alpha=%.2e(gate=%.2f) | max|Δv|≈%.3f m/s\n'], ...
             phi_k, delta_phi_k, tau_k*1e6, ring_k, gamma_k, edge_contam_k, ...
-            lambda_polar_eff, lambda_edge_eff, edge_damp_eff, alpha, alpha_gate, delta_v_max);
+            lambda_polar_eff, lambda_edge_eff, edge_damp_eff, beta, alpha, alpha_gate, delta_v_max);
 
         % 本步的“预测下降”供下一步计算 γ_{k+1}
         pred_drop_cur = -perc_step_size * alpha * real(gradient_img(:)'*search_dir(:));
@@ -1309,10 +1357,12 @@ for f_idx = 1:numel(fDATA)
         edge_blend_eff = 0;
         if enableEdgeGuard && ~updateAttenuation && (fDATA(f_idx) >= f_edge_guard_start) && ~isempty(edge_ref_cur)
             edge_blend_eff = edge_blend_base * (f_edge_guard_start / fDATA(f_idx))^2;
-            if ~isnan(edge_contam_k) && ~isnan(prev_edge_contam) && ...
-                    (edge_contam_k > edge_contam_rise_ratio * prev_edge_contam)
+            if edge_contam_rise_streak >= edge_contam_rise_need_count
                 edge_blend_eff = min(edge_blend_max, edge_blend_eff * 1.5);
             end
+            % 对 blend 做EMA，避免奇偶迭代闪烁
+            edge_blend_eff = edge_blend_ema_alpha * edge_blend_eff + ...
+                             (1 - edge_blend_ema_alpha) * prev_edge_blend_eff;
             VEL_ESTIM = VEL_ESTIM .* (1 - edge_blend_eff * edge_guard_mask) + ...
                         edge_ref_cur .* (edge_blend_eff * edge_guard_mask);
         end
@@ -1343,6 +1393,7 @@ for f_idx = 1:numel(fDATA)
         prev_ring_k    = ring_k;
         prev_pred_drop = pred_drop_cur;
         prev_edge_contam = edge_contam_k;
+        prev_edge_blend_eff = edge_blend_eff;
 
         % Visualize coarse 
         % 频率/VE信息显示在 figure 窗口标题栏
@@ -1558,6 +1609,7 @@ save(filename_results, '-v7.3', ...
     'VE_freqMode','VE_freqThresh','VE_manualFlags','VE_flags', ...
     'frac_shift_lo','frac_shift_hi','frac_shift_f_split', ...
     'beta_ve', 'enableIllumComp', 'eps_illum', ...
+    'enableIllumCompHighFreq','f_illum_disable','eps_illum_hf', ...
     'misfitType', 'alpha_hv', 'alpha_hv_atten', ...
     'enableLFPrior', 'lambda_stage', 'f_stage1_cutoff', 'f_stage2_cutoff', ...
     'stage1_ref_saved', 'stage2_ref_saved', ...
@@ -1570,6 +1622,10 @@ save(filename_results, '-v7.3', ...
     'edge_r_inner_ratio','edge_r_outer_ratio', ...
     'lambda_edge_anchor','edge_step_damp_max', ...
     'edge_blend_base','edge_blend_max','edge_contam_rise_ratio', ...
+    'edge_contam_rise_need_count','edge_blend_ema_alpha', ...
+    'normalize_search_dir_hv','enableHV_CG','hv_beta_max', ...
+    'hv_alpha_mode','hv_alpha_scale','hv_alpha_min','hv_alpha_max', ...
+    'alpha_fix_sos_hv','alpha_fix_atten_hv', ...
     'ring_bg_inner_ratio','ring_bg_outer_ratio', ...
     'mainLoopElapsedSec', 'scriptElapsedSec');
 
