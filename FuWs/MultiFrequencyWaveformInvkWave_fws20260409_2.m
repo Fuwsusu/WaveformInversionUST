@@ -68,7 +68,7 @@ misfitType = 'HV_polar';   % 'L2' | 'HV_polar'
 %   2) alpha_cap : 按期望 max|Δv| 估计的上限，避免一步过大导致发散
 % 最终 alpha = min(alpha_ls, alpha_cap)，兼顾“能动起来”与稳定性。
 optimizerType      = 'CG_PR_FR';  % 目前支持: 'CG_PR_FR'
-target_dv_per_iter = 1.5;         % 目标每步最大速度改变量 [m/s]（可调 0.5~3）
+target_dv_per_iter = 15;         % 目标每步最大速度改变量 [m/s]（可调 0.5~3）
 alpha_floor        = 1e-8;        % 步长下限，避免数值退化为零步
 % --------------------------------------------------------------
 
@@ -215,7 +215,7 @@ cmap_rb = [
 ];
 
 % Load Extracted Dataset
-filename = 'kWave_BreastCT_half'; % 'kWave_BreastCT', 'kWave_BreastMRI'
+filename = 'kWave_BreastCT_half2'; % 'kWave_BreastCT', 'kWave_BreastMRI'
 load(['D:\Document_ING_fws\WaveformInversionUST\Simulations\datasets\', filename, '.mat'], ...
     'xi_orig', 'yi_orig', 'C', 'atten', ...
     'time', 'transducerPositionsXY', 'full_dataset');
