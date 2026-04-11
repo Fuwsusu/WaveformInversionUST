@@ -67,12 +67,14 @@ misfitType = 'PolarPhase';   % 'L2' | 'PolarPhase'
 
 % ------------------ fws: 优化器设置（新增） ------------------
 % 用户反馈“更新太小、速度图几乎不变”时，可用CG而非纯梯度下降。
-% 这里统一启用非线性共轭梯度（PR+ / FR 截断），并保留步长安全夹紧：
-%   1) alpha_ls  : 线性化线搜索步长（与原L2流程一致）
-%   2) alpha_cap : 按期望 max|Δv| 估计的上限，避免一步过大导致发散
-% 最终 alpha = min(alpha_ls, alpha_cap)，兼顾“能动起来”与稳定性。
+% 这里统一启用非线性共轭梯度（PR+ / FR 截断），并保留步长保护：
+%   1) alpha_ls  : 线性化线搜索步长（主步长）
+%   2) alpha_cap : 风险触发时启用的硬上限（防止坏步冲坏）
+% 默认“先放行 alpha_ls”，仅在拟合/时移/环伪影恶化时才裁剪。
 optimizerType      = 'CG_PR_FR';  % 目前支持: 'CG_PR_FR'
-target_dv_per_iter = 15;         % 目标每步最大速度改变量 [m/s]（可调 0.5~3）
+target_dv_per_iter = 15;         % 风险触发时的目标每步速度改变量上限 [m/s]
+enableConditionalAlphaCap = true; % true=仅在风险触发时启用 alpha_cap
+alpha_cap_percentile      = 99;   % 用 |search_dir| 的分位数代替 max（避免尖峰拖慢全局）
 alpha_floor        = 1e-8;        % 步长下限，避免数值退化为零步
 % --------------------------------------------------------------
 
@@ -1256,18 +1258,51 @@ for f_idx = 1:numel(fDATA)
         num_ls   = -real(gradient_img(:)'*search_dir(:));
         alpha_ls = num_ls / (den_ls + eps);
 
-        sd_max      = max(abs(search_dir(:))) + eps;
-        alpha_cap   = target_dv_per_iter / ((mean(VEL_ESTIM(:))^2) * sd_max + eps);
-        alpha       = min(alpha_ls, alpha_cap);
-        alpha       = max(alpha, alpha_floor);
+        % PolarPhase 线搜索分母修正：
+        % 分子来自 PolarPhase 梯度，若直接复用 L2 的 dREC_SIM 二范数作为分母，
+        % 会导致相位/幅度混合量纲不匹配。这里在不改变现有流程的前提下，
+        % 通过 alpha_hv_cur 的加权平方和对分母做一次近似缩放修正。
+        if strcmpi(misfitType, 'PolarPhase')
+            dPhi_sq_accum = 0;
+            for elmt_idx = 1:numel(tx_include_cur)
+                dREC_elmt = dREC_SIM(elmt_idx, :).';
+                dPhi_sq_accum = dPhi_sq_accum + sum(abs(dREC_elmt).^2);
+            end
+            scale_pp  = (1 - alpha_hv_cur)^2 + alpha_hv_cur^2;
+            den_ls_pp = dPhi_sq_accum * scale_pp;
+            alpha_ls  = num_ls / (den_ls_pp + eps);
+        end
+
+        % 风险判据：仅在“坏步风险”出现时才启用硬步长上限
+        bad_fit_flag   = ~isnan(delta_phi_k) && (delta_phi_k <= 0);
+        tau_rise_flag  = ~isnan(prev_tau_k) && ~isnan(tau_k) && (tau_k > tau_rise_ratio * prev_tau_k);
+        ring_rise_flag = ~isnan(prev_ring_k) && ~isnan(ring_k) && (ring_k > ring_rise_ratio * prev_ring_k);
+        cap_risk_flag  = bad_fit_flag || tau_rise_flag || ring_rise_flag;
+
+        % 用分位数替代 max|search_dir|，避免个别尖峰像素把全局步长拖得过小
+        sd_abs = sort(abs(search_dir(:)));
+        q_idx  = max(1, min(numel(sd_abs), round((alpha_cap_percentile/100) * numel(sd_abs))));
+        sd_ref = sd_abs(q_idx) + eps;
+        alpha_cap  = target_dv_per_iter / ((mean(VEL_ESTIM(:))^2) * sd_ref + eps);
+
+        if enableConditionalAlphaCap
+            if cap_risk_flag
+                alpha = min(alpha_ls, alpha_cap);
+            else
+                alpha = alpha_ls;
+            end
+        else
+            alpha = min(alpha_ls, alpha_cap);
+        end
+        alpha = max(alpha, alpha_floor);
 
         % 可信度门控：根据 ΔΦ/τ/R 动态缩步与增强径向TV
         alpha_gate = 1.0;
         if enableTrustGate && ~isnan(delta_phi_k)
-            bad_fit = (delta_phi_k <= 0);
-            tau_rise = ~isnan(prev_tau_k) && (tau_k > tau_rise_ratio * prev_tau_k);
+            bad_fit = bad_fit_flag;
+            tau_rise = tau_rise_flag;
             small_drop = (delta_phi_k < phi_small_drop_ratio * max(prev_phi_k, eps));
-            ring_rise = ~isnan(prev_ring_k) && ~isnan(ring_k) && (ring_k > ring_rise_ratio * prev_ring_k);
+            ring_rise = ring_rise_flag;
             if bad_fit || tau_rise
                 alpha_gate = min(alpha_gate, alpha_gate_badfit);
             end
@@ -1570,6 +1605,7 @@ save(filename_results, '-v7.3', ...
     'frac_shift_lo','frac_shift_hi','frac_shift_f_split', ...
     'beta_ve', 'enableIllumComp', 'eps_illum', ...
     'misfitType', 'alpha_hv', 'alpha_hv_atten', ...
+    'optimizerType','target_dv_per_iter','enableConditionalAlphaCap','alpha_cap_percentile', ...
     'enableLFPrior', 'lambda_stage', 'f_stage1_cutoff', 'f_stage2_cutoff', ...
     'stage1_ref_saved', 'stage2_ref_saved', ...
     'enableTV', 'lambda_tv', 'eps_tv', ...
