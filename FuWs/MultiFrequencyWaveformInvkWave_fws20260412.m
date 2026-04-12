@@ -72,7 +72,10 @@ misfitType = 'PolarPhase';   % 'L2' | 'PolarPhase'
 %   2) alpha_cap : 按期望 max|Δv| 估计的上限，避免一步过大导致发散
 % 最终 alpha = min(alpha_ls, alpha_cap)，兼顾“能动起来”与稳定性。
 optimizerType      = 'CG_PR_FR';  % 目前支持: 'CG_PR_FR'
-target_dv_per_iter = 15;         % 目标每步最大速度改变量 [m/s]（可调 0.5~3）
+target_dv_per_iter = [];          % []或<=0: 自动估计；>0: 手动指定每步max|Δv| [m/s]
+auto_dv_ratio      = 3e-3;        % 自动模式: 目标Δv = auto_dv_ratio*mean(VEL_ESTIM)（建议2e-3~8e-3）
+auto_dv_min        = 1.0;         % 自动模式下限 [m/s]
+auto_dv_max        = 15.0;        % 自动模式上限 [m/s]
 alpha_floor        = 1e-8;        % 步长下限，避免数值退化为零步
 % --------------------------------------------------------------
 
@@ -1271,8 +1274,15 @@ for f_idx = 1:numel(fDATA)
             alpha_ls  = num_ls / (den_ls_pp + eps);
         end
 
+        % 步长上限: 将 max|Δv| 控制在 target_dv_eff 内（手动或自动）
+        vmean = mean(VEL_ESTIM(:));
+        if isempty(target_dv_per_iter) || (target_dv_per_iter <= 0)
+            target_dv_eff = min(max(auto_dv_ratio * vmean, auto_dv_min), auto_dv_max);
+        else
+            target_dv_eff = target_dv_per_iter;
+        end
         sd_max      = max(abs(search_dir(:))) + eps;
-        alpha_cap   = target_dv_per_iter / ((mean(VEL_ESTIM(:))^2) * sd_max + eps);
+        alpha_cap   = target_dv_eff / ((vmean^2) * sd_max + eps);
         alpha       = min(alpha_ls, alpha_cap);
         alpha       = max(alpha, alpha_floor);
 
