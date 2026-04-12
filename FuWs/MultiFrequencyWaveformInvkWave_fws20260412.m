@@ -67,8 +67,8 @@ misfitType = 'PolarPhase';   % 'L2' | 'PolarPhase'
 
 % ------------------ fws: 优化器设置（新增） ------------------
 % 用户反馈“更新太小、速度图几乎不变”时，可用CG而非纯梯度下降。
-% 这里统一启用非线性共轭梯度（PR+ / FR 截断），步长采用线搜索自然决定，
-% 仅保留 alpha_floor 防止退化为数值零步。
+% 这里统一启用非线性共轭梯度（PR+ / FR 截断），步长由线搜索给出，
+% 并叠加“数据驱动的自适应 alpha_cap”防止 PolarPhase 下偶发过冲。
 optimizerType      = 'CG_PR_FR';  % 目前支持: 'CG_PR_FR'
 alpha_floor        = 1e-8;        % 步长下限，避免数值退化为零步
 % --------------------------------------------------------------
@@ -801,6 +801,7 @@ prev_tau_k       = nan;
 prev_ring_k      = nan;
 prev_pred_drop   = nan;
 prev_edge_contam = nan;
+prev_delta_v_max = nan;   % 上一次实际 max|Δv|，用于自适应 alpha_cap
 % -----------------------------------------------
 
 %% ---------- 路径 & GIF 初始化（主循环前统一定义）----------
@@ -888,6 +889,7 @@ for f_idx = 1:numel(fDATA)
             prev_ring_k       = nan;
             prev_pred_drop    = nan;
             prev_edge_contam  = nan;
+            prev_delta_v_max  = nan;
         end
 
         if iter_f_idx == 1
@@ -1248,7 +1250,7 @@ for f_idx = 1:numel(fDATA)
         % den = real(dREC_SIM(:)'*dREC_SIM(:));
         % alpha = -(gradient_img(:)'*search_dir(:)) / (den + eps(den));
 
-        % 统一线搜索：直接采用线性化步长（不设主观上限）。
+        % 统一线搜索：线性化步长 + 自适应 alpha_cap（由上次实际更新量驱动）。
         den_ls   = real(dREC_SIM(:)'*dREC_SIM(:));
         num_ls   = -real(gradient_img(:)'*search_dir(:));
         alpha_ls = num_ls / (den_ls + eps);
@@ -1260,15 +1262,21 @@ for f_idx = 1:numel(fDATA)
         if strcmpi(misfitType, 'PolarPhase')
             dPhi_sq_accum = 0;
             for elmt_idx = 1:numel(tx_include_cur)
-                dREC_elmt = dREC_SIM(elmt_idx, :).';
-                dPhi_sq_accum = dPhi_sq_accum + sum(abs(dREC_elmt).^2);
+                dPhi_sq_accum = dPhi_sq_accum + sum(abs(dREC_SIM(elmt_idx,:)).^2);
             end
             scale_pp  = (1 - alpha_hv_cur)^2 + alpha_hv_cur^2;
-            den_ls_pp = dPhi_sq_accum * scale_pp;
-            alpha_ls  = num_ls / (den_ls_pp + eps);
+            alpha_ls  = num_ls / (dPhi_sq_accum * scale_pp + eps);
         end
 
-        alpha = max(alpha_ls, alpha_floor);
+        sd_max = max(abs(search_dir(:))) + eps;
+        if isnan(prev_delta_v_max)
+            dv_cap = 20.0;  % 首次迭代保守上限 [m/s]
+        else
+            dv_cap = max(prev_delta_v_max * 3.0, 5.0);  % 上次3倍，最低5 m/s
+        end
+        alpha_cap = dv_cap / (mean(VEL_ESTIM(:))^2 * sd_max + eps);
+        alpha = min(alpha_ls, alpha_cap);
+        alpha = max(alpha, alpha_floor);
 
         % 可信度门控：根据 ΔΦ/τ/R 动态缩步与增强径向TV
         alpha_gate = 1.0;
@@ -1332,6 +1340,7 @@ for f_idx = 1:numel(fDATA)
             end
             VEL_ESTIM = 1./real(SLOW_ESTIM);
         end
+        prev_delta_v_max = mean(VEL_ESTIM(:))^2 * perc_step_size * alpha * max(abs(search_dir(:)));
         % 外环后处理回拉：在更新后直接抑制边界漂移（高频SoS阶段）
         edge_blend_eff = 0;
         if enableEdgeGuard && ~updateAttenuation && (fDATA(f_idx) >= f_edge_guard_start) && ~isempty(edge_ref_cur)
