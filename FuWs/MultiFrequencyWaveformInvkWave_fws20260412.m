@@ -934,7 +934,6 @@ for f_idx = 1:numel(fDATA)
         % 两个标志位确保各只保存一次，不因阶段内多个频率重复覆盖。
         if enableLFPrior && ~stage1_ref_saved && fDATA(f_idx) > f_stage1_cutoff
             VEL_stage1_ref   = VEL_ESTIM;
-            grad_stage1_ref  = gradient_img_prev;  % 记录低频阶段末梯度方向参考
             stage1_ref_saved = true;
             fprintf('[LF 3-stage] 阶段1→2：已保存参考模型（f_stage1=%.3f MHz，当前 f=%.3f MHz）\n', ...
                 f_stage1_cutoff/1e6, fDATA(f_idx)/1e6);
@@ -1332,19 +1331,26 @@ for f_idx = 1:numel(fDATA)
                 end
                 % 低通尺度：与阶段1截止频率对应的半波长（像素域）
                 sigma_lp = max(1.0, c0 / max(2*f_stage1_cutoff*dxi_original, eps));
-                r_lp = max(2, ceil(3*sigma_lp));
-                [xx_lp, yy_lp] = meshgrid(-r_lp:r_lp, -r_lp:r_lp);
-                ker_lp = exp(-(xx_lp.^2 + yy_lp.^2) / (2*sigma_lp^2));
-                ker_lp = ker_lp / (sum(ker_lp(:)) + eps);
-                vel_lp_cur = conv2(VEL_ESTIM,  ker_lp, 'same');
-                vel_lp_ref = conv2(vel_ref_xf, ker_lp, 'same');
+                if exist('imgaussfilt', 'file') == 2
+                    vel_lp_cur = imgaussfilt(VEL_ESTIM,  sigma_lp);
+                    vel_lp_ref = imgaussfilt(vel_ref_xf, sigma_lp);
+                else
+                    r_lp = max(2, ceil(3*sigma_lp));
+                    [xx_lp, yy_lp] = meshgrid(-r_lp:r_lp, -r_lp:r_lp);
+                    ker_lp = exp(-(xx_lp.^2 + yy_lp.^2) / (2*sigma_lp^2));
+                    ker_lp = ker_lp / (sum(ker_lp(:)) + eps);
+                    vel_lp_cur = conv2(VEL_ESTIM,  ker_lp, 'same');
+                    vel_lp_ref = conv2(vel_ref_xf, ker_lp, 'same');
+                end
                 C_lf_k = norm(vel_lp_cur(:) - vel_lp_ref(:)) / (norm(vel_lp_ref(:)) + eps);
             end
 
             if exist('grad_stage1_ref', 'var')
                 g_ref = grad_stage1_ref(:);
                 g_cur = gradient_img(:);
-                cos_sim_grad = real(g_ref' * g_cur) / ((norm(g_ref) + eps) * (norm(g_cur) + eps));
+                if norm(g_ref) > 1e-12
+                    cos_sim_grad = real(g_ref' * g_cur) / ((norm(g_ref) + eps) * (norm(g_cur) + eps));
+                end
             end
         end
 
@@ -1429,6 +1435,16 @@ for f_idx = 1:numel(fDATA)
         end
         ATTEN_ESTIM = 2*pi*imag(SLOW_ESTIM)*sign(sign_conv);
         SLOW_ESTIM  = 1./VEL_ESTIM + 1i*sign(sign_conv)*ATTEN_ESTIM/(2*pi);
+
+        % [修改] 阶段1参考梯度延迟保存：在跨入阶段2后的首个频率完成SoS迭代后再保存，
+        % 避免 iter_f_idx==1 时 CG reset 导致 gradient_img_prev 被清零。
+        if enableLFPrior && stage1_ref_saved && ~exist('grad_stage1_ref','var') && ...
+                (fDATA(f_idx) > f_stage1_cutoff) && ~updateAttenuation && ...
+                (iter_f_idx == niterSoSPerFreq(f_idx))
+            grad_stage1_ref = gradient_img;
+            fprintf('[CrossFreq] 已保存 grad_stage1_ref（f=%.3fMHz，iter=%d）\n', ...
+                fDATA(f_idx)/1e6, iter);
+        end
 
         % Save coarse iteration
         VEL_ESTIM_ITER(:,:,iter)   = VEL_ESTIM;
@@ -1672,6 +1688,10 @@ end
 xi = xi_original; yi = yi_original;
 VEL_ESTIM_FINAL_NOPP   = VEL_ESTIM;
 ATTEN_ESTIM_FINAL_NOPP = ATTEN_ESTIM;
+fprintf('ATTEN_ESTIM range: [%.4e, %.4e] Np/(Hz*m)\n', ...
+    min(ATTEN_ESTIM(:)), max(ATTEN_ESTIM(:)));
+fprintf('dB/(cm*MHz) range: [%.3f, %.3f]\n', ...
+    Np2dB*slow2atten*min(ATTEN_ESTIM(:)), Np2dB*slow2atten*max(ATTEN_ESTIM(:)));
 
 save(filename_results, '-v7.3', ...
     'xi','yi','xi_original','yi_original', ...
