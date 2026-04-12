@@ -72,7 +72,10 @@ misfitType = 'PolarPhase';   % 'L2' | 'PolarPhase'
 %   2) alpha_cap : 按期望 max|Δv| 估计的上限，避免一步过大导致发散
 % 最终 alpha = min(alpha_ls, alpha_cap)，兼顾“能动起来”与稳定性。
 optimizerType      = 'CG_PR_FR';  % 目前支持: 'CG_PR_FR'
-target_dv_per_iter = 15;         % 目标每步最大速度改变量 [m/s]（可调 0.5~3）
+target_dv_per_iter = [];          % []或<=0: 自动估计；>0: 手动指定每步max|Δv| [m/s]
+auto_dv_ratio      = 3e-3;        % 自动模式: 目标Δv = auto_dv_ratio*mean(VEL_ESTIM)（建议2e-3~8e-3）
+auto_dv_min        = 1.0;         % 自动模式下限 [m/s]
+auto_dv_max        = 15.0;        % 自动模式上限 [m/s]
 alpha_floor        = 1e-8;        % 步长下限，避免数值退化为零步
 % --------------------------------------------------------------
 
@@ -181,6 +184,22 @@ alpha_gate_badfit      = 0.50;  % 拟合退化时步长缩放
 alpha_gate_ringgrowth  = 0.70;  % 环伪影增长时额外缩放
 lambda_polar_gate_boost = 1.25; % 环伪影增长时径向TV增强倍率
 lambda_polar_gate_max   = 3.00; % 径向TV最大增强上限（相对 lambda_polar）
+
+% ------------------ fws: 跨频一致性门控（新增） ------------------
+% 目的：连接低频/高频，避免高频阶段悄悄把低波数背景“带跑偏”
+% 指标：
+%   C_lf       = 低通后的当前模型与低频参考模型差异（越小越好）
+%   sigma_bg   = 纯水外环区域声速标准差（越小越好；环纹会明显抬高）
+%   cos_grad   = 当前梯度与低频参考梯度余弦相似度（越大越好）
+enableCrossFreqTrust   = true;
+clf_warn               = 0.10;  % C_lf 警戒阈值
+clf_rise_ratio         = 1.05;  % C_lf 较上一步上升>5% 视为恶化
+sigma_bg_warn          = 5.0;   % 纯水外环标准差警戒 [m/s]
+cos_grad_warn          = 0.30;  % 梯度相似度警戒阈值
+alpha_gate_xf_min      = 0.35;  % 跨频门控最小保留步长比例
+water_bg_inner_ratio   = 0.93;  % 纯水外环统计起点
+water_bg_outer_ratio   = 0.97;  % 纯水外环统计终点
+% -----------------------------------------------------------------------
 % -----------------------------------------------------------------------
 
 % ------------------ fws: 高频边界保护（抑制“中心污染外圈”） ------------------
@@ -769,6 +788,8 @@ edge_guard_mask = (R_grid - edge_r_inner_ratio*Rmax) ./ ...
                   max((edge_r_outer_ratio - edge_r_inner_ratio)*Rmax, eps);
 edge_guard_mask = min(max(edge_guard_mask, 0), 1);
 edge_outer_mask = edge_guard_mask > 0.95;  % 仅统计最外环污染
+pure_water_mask = (R_grid >= water_bg_inner_ratio*Rmax) & ...
+                  (R_grid <= water_bg_outer_ratio*Rmax);
 
 % 粗网格迭代结果
 VEL_ESTIM_ITER   = zeros(Nyi, Nxi, Niter);
@@ -786,6 +807,11 @@ LAMBDA_EDGE_EFF_ITER  = nan(1, Niter);
 EDGE_DAMP_EFF_ITER    = nan(1, Niter);
 EDGE_CONTAM_ITER      = nan(1, Niter);
 EDGE_BLEND_EFF_ITER   = nan(1, Niter);
+C_LF_ITER             = nan(1, Niter);
+MU_BG_ITER            = nan(1, Niter);
+SIGMA_BG_ITER         = nan(1, Niter);
+COS_GRAD_ITER         = nan(1, Niter);
+ALPHA_GATE_XF_ITER    = ones(1, Niter);
 
 %% ---------- 用户控制：迭代执行选项 ----------
 runAllIterations    = false;
@@ -802,6 +828,7 @@ stage2_ref_saved = false;
 prev_phi_k       = nan;
 prev_tau_k       = nan;
 prev_ring_k      = nan;
+prev_clf_k       = nan;
 prev_pred_drop   = nan;
 prev_edge_contam = nan;
 % -----------------------------------------------
@@ -889,6 +916,7 @@ for f_idx = 1:numel(fDATA)
             prev_phi_k        = nan;
             prev_tau_k        = nan;
             prev_ring_k       = nan;
+            prev_clf_k        = nan;
             prev_pred_drop    = nan;
             prev_edge_contam  = nan;
         end
@@ -906,6 +934,7 @@ for f_idx = 1:numel(fDATA)
         % 两个标志位确保各只保存一次，不因阶段内多个频率重复覆盖。
         if enableLFPrior && ~stage1_ref_saved && fDATA(f_idx) > f_stage1_cutoff
             VEL_stage1_ref   = VEL_ESTIM;
+            grad_stage1_ref  = gradient_img_prev;  % 记录低频阶段末梯度方向参考
             stage1_ref_saved = true;
             fprintf('[LF 3-stage] 阶段1→2：已保存参考模型（f_stage1=%.3f MHz，当前 f=%.3f MHz）\n', ...
                 f_stage1_cutoff/1e6, fDATA(f_idx)/1e6);
@@ -1271,10 +1300,53 @@ for f_idx = 1:numel(fDATA)
             alpha_ls  = num_ls / (den_ls_pp + eps);
         end
 
+        % 步长上限: 将 max|Δv| 控制在 target_dv_eff 内（手动或自动）
+        vmean = mean(VEL_ESTIM(:));
+        if isempty(target_dv_per_iter) || (target_dv_per_iter <= 0)
+            target_dv_eff = min(max(auto_dv_ratio * vmean, auto_dv_min), auto_dv_max);
+        else
+            target_dv_eff = target_dv_per_iter;
+        end
         sd_max      = max(abs(search_dir(:))) + eps;
-        alpha_cap   = target_dv_per_iter / ((mean(VEL_ESTIM(:))^2) * sd_max + eps);
+        alpha_cap   = target_dv_eff / ((vmean^2) * sd_max + eps);
         alpha       = min(alpha_ls, alpha_cap);
         alpha       = max(alpha, alpha_floor);
+
+        % 跨频一致性度量（低波数保真 + 纯水背景统计 + 梯度方向一致性）
+        C_lf_k        = nan;
+        mu_bg_k       = nan;
+        sigma_bg_k    = nan;
+        cos_sim_grad  = nan;
+        alpha_gate_xf = 1.0;
+        if enableCrossFreqTrust && ~updateAttenuation
+            if any(pure_water_mask(:))
+                mu_bg_k    = mean(VEL_ESTIM(pure_water_mask), 'omitnan');
+                sigma_bg_k = std(VEL_ESTIM(pure_water_mask), 0, 'omitnan');
+            end
+
+            if stage1_ref_saved
+                if stage2_ref_saved && fDATA(f_idx) > f_stage2_cutoff
+                    vel_ref_xf = VEL_stage2_ref;
+                else
+                    vel_ref_xf = VEL_stage1_ref;
+                end
+                % 低通尺度：与阶段1截止频率对应的半波长（像素域）
+                sigma_lp = max(1.0, c0 / max(2*f_stage1_cutoff*dxi_original, eps));
+                r_lp = max(2, ceil(3*sigma_lp));
+                [xx_lp, yy_lp] = meshgrid(-r_lp:r_lp, -r_lp:r_lp);
+                ker_lp = exp(-(xx_lp.^2 + yy_lp.^2) / (2*sigma_lp^2));
+                ker_lp = ker_lp / (sum(ker_lp(:)) + eps);
+                vel_lp_cur = conv2(VEL_ESTIM,  ker_lp, 'same');
+                vel_lp_ref = conv2(vel_ref_xf, ker_lp, 'same');
+                C_lf_k = norm(vel_lp_cur(:) - vel_lp_ref(:)) / (norm(vel_lp_ref(:)) + eps);
+            end
+
+            if exist('grad_stage1_ref', 'var')
+                g_ref = grad_stage1_ref(:);
+                g_cur = gradient_img(:);
+                cos_sim_grad = real(g_ref' * g_cur) / ((norm(g_ref) + eps) * (norm(g_cur) + eps));
+            end
+        end
 
         % 可信度门控：根据 ΔΦ/τ/R 动态缩步与增强径向TV
         alpha_gate = 1.0;
@@ -1290,6 +1362,24 @@ for f_idx = 1:numel(fDATA)
                 alpha_gate = min(alpha_gate, alpha_gate_ringgrowth);
             end
         end
+        if enableCrossFreqTrust && ~updateAttenuation
+            if ~isnan(C_lf_k)
+                clf_rise = ~isnan(prev_clf_k) && (C_lf_k > clf_rise_ratio * prev_clf_k);
+                if (C_lf_k > clf_warn) || clf_rise
+                    alpha_gate_xf = min(alpha_gate_xf, ...
+                        max(alpha_gate_xf_min, 1 - 5*max(C_lf_k - clf_warn, 0)));
+                end
+            end
+            if ~isnan(sigma_bg_k) && (sigma_bg_k > sigma_bg_warn)
+                alpha_gate_xf = min(alpha_gate_xf, ...
+                    max(alpha_gate_xf_min, 1 - (sigma_bg_k - sigma_bg_warn)/20));
+            end
+            if ~isnan(cos_sim_grad) && (cos_sim_grad < cos_grad_warn)
+                alpha_gate_xf = min(alpha_gate_xf, ...
+                    max(alpha_gate_xf_min, (cos_sim_grad + 1)/2));
+            end
+        end
+        alpha_gate = min(alpha_gate, alpha_gate_xf);
         alpha = alpha * alpha_gate;
 
         % 高频外环步长阻尼：减少外围被中心结构“带跑”
@@ -1309,10 +1399,11 @@ for f_idx = 1:numel(fDATA)
         delta_s_max  = perc_step_size * alpha * max(abs(search_dir(:)));
         delta_v_max  = mean(VEL_ESTIM(:))^2 * delta_s_max;
         fprintf(['  Φ=%.3e | ΔΦ=% .3e | τ=%.3eus | R=%.3f | γ=% .3f' ...
+                 ' | C_lf=%.3f σbg=%.2f cosg=%.2f' ...
                  ' | EdgeContam=%.3f λpolar=%.2e λedge=%.2e damp=%.2f' ...
-                 ' | alpha=%.2e(gate=%.2f) | max|Δv|≈%.3f m/s\n'], ...
-            phi_k, delta_phi_k, tau_k*1e6, ring_k, gamma_k, edge_contam_k, ...
-            lambda_polar_eff, lambda_edge_eff, edge_damp_eff, alpha, alpha_gate, delta_v_max);
+                 ' | alpha=%.2e(gate=%.2f,xf=%.2f) | max|Δv|≈%.3f m/s\n'], ...
+            phi_k, delta_phi_k, tau_k*1e6, ring_k, gamma_k, C_lf_k, sigma_bg_k, cos_sim_grad, edge_contam_k, ...
+            lambda_polar_eff, lambda_edge_eff, edge_damp_eff, alpha, alpha_gate, alpha_gate_xf, delta_v_max);
 
         % 本步的“预测下降”供下一步计算 γ_{k+1}
         pred_drop_cur = -perc_step_size * alpha * real(gradient_img(:)'*search_dir(:));
@@ -1355,12 +1446,18 @@ for f_idx = 1:numel(fDATA)
         EDGE_DAMP_EFF_ITER(iter)   = edge_damp_eff;
         EDGE_CONTAM_ITER(iter)     = edge_contam_k;
         EDGE_BLEND_EFF_ITER(iter)  = edge_blend_eff;
+        C_LF_ITER(iter)            = C_lf_k;
+        MU_BG_ITER(iter)           = mu_bg_k;
+        SIGMA_BG_ITER(iter)        = sigma_bg_k;
+        COS_GRAD_ITER(iter)        = cos_sim_grad;
+        ALPHA_GATE_XF_ITER(iter)   = alpha_gate_xf;
         savedIters(end+1)          = iter; %#ok<SAGROW>
 
         % 迭代状态滚动到下一次
         prev_phi_k     = phi_k;
         prev_tau_k     = tau_k;
         prev_ring_k    = ring_k;
+        prev_clf_k     = C_lf_k;
         prev_pred_drop = pred_drop_cur;
         prev_edge_contam = edge_contam_k;
 
@@ -1368,6 +1465,7 @@ for f_idx = 1:numel(fDATA)
         prev_phi_k     = phi_k;
         prev_tau_k     = tau_k;
         prev_ring_k    = ring_k;
+        prev_clf_k     = C_lf_k;
         prev_pred_drop = pred_drop_cur;
 
         % Visualize coarse 
@@ -1563,6 +1661,11 @@ if ~isempty(savedIters)
     EDGE_DAMP_EFF_ITER    = EDGE_DAMP_EFF_ITER(savedIters);
     EDGE_CONTAM_ITER      = EDGE_CONTAM_ITER(savedIters);
     EDGE_BLEND_EFF_ITER   = EDGE_BLEND_EFF_ITER(savedIters);
+    C_LF_ITER             = C_LF_ITER(savedIters);
+    MU_BG_ITER            = MU_BG_ITER(savedIters);
+    SIGMA_BG_ITER         = SIGMA_BG_ITER(savedIters);
+    COS_GRAD_ITER         = COS_GRAD_ITER(savedIters);
+    ALPHA_GATE_XF_ITER    = ALPHA_GATE_XF_ITER(savedIters);
 end
 
 % Save coarse result
@@ -1579,6 +1682,7 @@ save(filename_results, '-v7.3', ...
     'GAMMA_TRUST_ITER','ALPHA_GATE_ITER','LAMBDA_POLAR_EFF_ITER', ...
     'LAMBDA_EDGE_EFF_ITER','EDGE_DAMP_EFF_ITER', ...
     'EDGE_CONTAM_ITER','EDGE_BLEND_EFF_ITER', ...
+    'C_LF_ITER','MU_BG_ITER','SIGMA_BG_ITER','COS_GRAD_ITER','ALPHA_GATE_XF_ITER', ...
     'savedIters', 'enableVirtualElements', 'useVirtualTx', 'orig_numElements', ...
     'virtualElementsMode', 'exclMode','frac_excl', ...
     'VE_freqMode','VE_freqThresh','VE_manualFlags','VE_flags', ...
@@ -1592,6 +1696,8 @@ save(filename_results, '-v7.3', ...
     'enableTrustGate','phi_small_drop_ratio','tau_rise_ratio','ring_rise_ratio', ...
     'alpha_gate_badfit','alpha_gate_ringgrowth', ...
     'lambda_polar_gate_boost','lambda_polar_gate_max', ...
+    'enableCrossFreqTrust','clf_warn','clf_rise_ratio','sigma_bg_warn', ...
+    'cos_grad_warn','alpha_gate_xf_min','water_bg_inner_ratio','water_bg_outer_ratio', ...
     'enableEdgeGuard','f_edge_guard_start', ...
     'edge_r_inner_ratio','edge_r_outer_ratio', ...
     'lambda_edge_anchor','edge_step_damp_max', ...
@@ -1602,6 +1708,9 @@ save(filename_results, '-v7.3', ...
 % [修改] 三阶段参考模型追加保存（变量存在时才追加，避免未进入对应阶段时报错）
 if exist('VEL_stage1_ref', 'var')
     save(filename_results, '-append', 'VEL_stage1_ref');
+end
+if exist('grad_stage1_ref', 'var')
+    save(filename_results, '-append', 'grad_stage1_ref');
 end
 if exist('VEL_stage2_ref', 'var')
     save(filename_results, '-append', 'VEL_stage2_ref');
