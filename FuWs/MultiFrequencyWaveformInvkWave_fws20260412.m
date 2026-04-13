@@ -1640,6 +1640,98 @@ legend('Location','best');
 xlim([xi_original(1), xi_original(end)]);
 ylim(crange);
 
+%% ===================== Quantitative Metrics (PSNR / CNR / SSIM / RD) =====================
+% 说明：
+% 1) 为保证与重建网格一致，先将真值 C 插值到 (xi_original, yi_original)
+% 2) 目标/背景区域由真值相对背景声速偏差自动生成（分位数阈值）
+% 3) RD 采用图中定义：|c_recon - c_true| / |c_bkgnd - c_true| * 100%
+
+% --- 可调参数（用于目标/背景掩膜自动生成） ---
+targetDevPct = 85;   % 偏差绝对值 >= P85 视为目标区域
+bgDevPct     = 40;   % 偏差绝对值 <= P40 视为背景区域
+bg_ref_tol   = 5.0;  % [m/s] 背景参考容差（用于兜底）
+
+% --- 将真值插值到重建网格 ---
+[X_true, Y_true]     = meshgrid(xi_orig, yi_orig);
+[X_recon, Y_recon]   = meshgrid(xi_original, yi_original);
+C_true_on_reconGrid  = interp2(X_true, Y_true, C, X_recon, Y_recon, 'linear', nan);
+
+% 仅在有效区域计算指标
+valid_mask = isfinite(C_true_on_reconGrid) & isfinite(VEL_ESTIM);
+v_true  = C_true_on_reconGrid(valid_mask);
+v_recon = VEL_ESTIM(valid_mask);
+
+% --- PSNR ---
+mse_vel = mean((v_recon - v_true).^2);
+peakVel = max(v_true);
+if mse_vel > 0
+    PSNR_dB = 10 * log10((peakVel^2) / mse_vel);
+else
+    PSNR_dB = inf;
+end
+
+% --- SSIM（全局统计形式，避免依赖工具箱） ---
+L_dyn = max(v_true) - min(v_true);
+if L_dyn <= 0
+    SSIM_val = 1.0;
+else
+    C1_ssim = (0.01 * L_dyn)^2;
+    C2_ssim = (0.03 * L_dyn)^2;
+    mu_t = mean(v_true);
+    mu_r = mean(v_recon);
+    var_t = var(v_true, 1);  % 使用总体方差
+    var_r = var(v_recon, 1);
+    cov_tr = mean((v_true - mu_t) .* (v_recon - mu_r));
+    SSIM_val = ((2*mu_t*mu_r + C1_ssim) * (2*cov_tr + C2_ssim)) / ...
+               ((mu_t^2 + mu_r^2 + C1_ssim) * (var_t + var_r + C2_ssim));
+end
+
+% --- CNR / RD 需要目标与背景区域 ---
+bg_ref = median(C_true_on_reconGrid(valid_mask), 'omitnan');
+dev_true = abs(C_true_on_reconGrid - bg_ref);
+dev_valid = dev_true(valid_mask);
+dev_target_th = prctile(dev_valid, targetDevPct);
+dev_bg_th     = prctile(dev_valid, bgDevPct);
+
+target_mask = valid_mask & (dev_true >= dev_target_th);
+bg_mask     = valid_mask & (dev_true <= dev_bg_th);
+
+% 兜底：若分位数导致空集，退化为固定阈值法
+if nnz(target_mask) < 10
+    target_mask = valid_mask & (abs(C_true_on_reconGrid - bg_ref) > bg_ref_tol);
+end
+if nnz(bg_mask) < 10
+    bg_mask = valid_mask & (abs(C_true_on_reconGrid - bg_ref) <= bg_ref_tol);
+end
+
+if nnz(target_mask) > 1 && nnz(bg_mask) > 1
+    target_recon = VEL_ESTIM(target_mask);
+    bg_recon     = VEL_ESTIM(bg_mask);
+    target_true  = C_true_on_reconGrid(target_mask);
+
+    mu_target = mean(target_recon);
+    mu_bg     = mean(bg_recon);
+    std_target = std(target_recon, 1);
+    std_bg     = std(bg_recon, 1);
+    CNR_val = abs(mu_target - mu_bg) / max(sqrt(std_target^2 + std_bg^2), eps);
+
+    c_recon = mu_target;
+    c_true  = mean(target_true);
+    c_bkgnd = mu_bg;
+    RD_percent = abs(c_recon - c_true) / max(abs(c_bkgnd - c_true), eps) * 100;
+else
+    CNR_val    = nan;
+    RD_percent = nan;
+end
+
+fprintf('\n================ 定量指标 (SoS) ================\n');
+fprintf('PSNR : %.4f dB\n', PSNR_dB);
+fprintf('CNR  : %.6f\n', CNR_val);
+fprintf('SSIM : %.6f\n', SSIM_val);
+fprintf('RD   : %.4f %%\n', RD_percent);
+fprintf('目标像素数: %d, 背景像素数: %d\n', nnz(target_mask), nnz(bg_mask));
+fprintf('===============================================\n\n');
+
 %% ===================== Save =====================
 suffix = 'WaveformInversionResults';
 filename_results = [result_dir, filename, '_', verTag, '_NOPP_', suffix, '.mat'];
@@ -1703,7 +1795,9 @@ save(filename_results, '-v7.3', ...
     'lambda_edge_anchor','edge_step_damp_max', ...
     'edge_blend_base','edge_blend_max','edge_contam_rise_ratio', ...
     'ring_bg_inner_ratio','ring_bg_outer_ratio', ...
-    'mainLoopElapsedSec', 'scriptElapsedSec');
+    'mainLoopElapsedSec', 'scriptElapsedSec', ...
+    'PSNR_dB','CNR_val','SSIM_val','RD_percent', ...
+    'targetDevPct','bgDevPct','bg_ref_tol');
 
 % [修改] 三阶段参考模型追加保存（变量存在时才追加，避免未进入对应阶段时报错）
 if exist('VEL_stage1_ref', 'var')
