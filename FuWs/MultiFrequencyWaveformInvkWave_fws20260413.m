@@ -47,7 +47,7 @@ verTag                = 'V3_5';        % 保存版本号
 % 目的：每个频率完成后，对当前速度图做一次高斯低通，作为“下一个相邻频率”的初值。
 % 注意：仅在频率切换点生效；不在单频迭代内平滑梯度。
 enableInterFreqGaussian = true;         % true=在相邻频率之间做高斯平滑衔接
-gaussSigmaScale        = 1.0;           % sigma倍率（1.0=半波长准则）
+gaussSigmaScale        = 0.3;           % sigma倍率（建议0.3~0.5，抑制跨频扩散伪影）
 saveInterFreqInitMat   = true;          % true=导出每次邻频衔接模型到mat文件
 % ----------------------------------------------------------------------
 
@@ -1569,7 +1569,12 @@ for f_idx = 1:numel(fDATA)
         ker_g = exp(-(xx_g.^2 + yy_g.^2) / (2 * sigma_gauss^2));
         ker_g = ker_g / (sum(ker_g(:)) + eps);
 
-        VEL_ESTIM = conv2(VEL_ESTIM, ker_g, 'same');
+        % 仅在阵元环内做平滑，避免PML边界伪影向成像域扩散
+        R_trans = max(sqrt(transducerPositionsX.^2 + transducerPositionsY.^2));
+        smooth_mask = (R_grid <= R_trans * 0.98);  % 留少量边缘余量
+
+        VEL_smooth = conv2(VEL_ESTIM, ker_g, 'same');
+        VEL_ESTIM = VEL_ESTIM .* (~smooth_mask) + VEL_smooth .* smooth_mask;
         SLOW_ESTIM = 1./VEL_ESTIM + 1i*sign(sign_conv)*ATTEN_ESTIM/(2*pi);
 
         if saveInterFreqInitMat
@@ -1579,7 +1584,7 @@ for f_idx = 1:numel(fDATA)
         end
 
         fprintf(['[InterFreq] 已生成邻频高斯初值: f=%.3f -> %.3f MHz | ' ...
-                 'lambda=%.3f mm, sigma=%.3f grid\n'], ...
+                 'lambda=%.3f mm, sigma=%.3f grid | mask内平滑\n'], ...
                 f_cur/1e6, f_next/1e6, lambda_cur*1e3, sigma_gauss);
     end
 
