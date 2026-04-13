@@ -969,14 +969,32 @@ for f_idx = 1:numel(fDATA)
             VEL_stage1_ref   = VEL_ESTIM;
             grad_stage1_ref  = gradient_img_prev;  % 记录低频阶段末梯度方向参考
             stage1_ref_saved = true;
+            % 阶段1→2边界平滑：抑制低频阶段累积的粒状噪声，避免传递到中频阶段
+            sigma_s1 = max(1.0, (c0 / f_stage1_cutoff) / (2 * dxi_original));
+            r_s1 = ceil(3 * sigma_s1);
+            [xx_s1, yy_s1] = meshgrid(-r_s1:r_s1, -r_s1:r_s1);
+            ker_s1 = exp(-(xx_s1.^2 + yy_s1.^2) / (2 * sigma_s1^2));
+            ker_s1 = ker_s1 / sum(ker_s1(:));
+            VEL_ESTIM = conv2(VEL_ESTIM, ker_s1, 'same');
+            SLOW_ESTIM = 1./VEL_ESTIM + 1i*sign(sign_conv)*ATTEN_ESTIM/(2*pi);
             fprintf('[LF 3-stage] 阶段1→2：已保存参考模型（f_stage1=%.3f MHz，当前 f=%.3f MHz）\n', ...
                 f_stage1_cutoff/1e6, fDATA(f_idx)/1e6);
+            fprintf('[Stage smooth] 阶段1→2 Gaussian平滑，sigma=%.2f pix\n', sigma_s1);
         end
         if enableLFPrior && ~stage2_ref_saved && fDATA(f_idx) > f_stage2_cutoff
             VEL_stage2_ref   = VEL_ESTIM;
             stage2_ref_saved = true;
+            % 阶段2→3边界平滑：轻度抑制中频残余噪声，同时保留已建立结构
+            sigma_s2 = max(1.0, (c0 / f_stage2_cutoff) / (2 * dxi_original));
+            r_s2 = ceil(3 * sigma_s2);
+            [xx_s2, yy_s2] = meshgrid(-r_s2:r_s2, -r_s2:r_s2);
+            ker_s2 = exp(-(xx_s2.^2 + yy_s2.^2) / (2 * sigma_s2^2));
+            ker_s2 = ker_s2 / sum(ker_s2(:));
+            VEL_ESTIM = conv2(VEL_ESTIM, ker_s2, 'same');
+            SLOW_ESTIM = 1./VEL_ESTIM + 1i*sign(sign_conv)*ATTEN_ESTIM/(2*pi);
             fprintf('[LF 3-stage] 阶段2→3：已保存参考模型（f_stage2=%.3f MHz，当前 f=%.3f MHz）\n', ...
                 f_stage2_cutoff/1e6, fDATA(f_idx)/1e6);
+            fprintf('[Stage smooth] 阶段2→3 Gaussian平滑，sigma=%.2f pix\n', sigma_s2);
         end
         % -----------------------------------------------------------------------
 
