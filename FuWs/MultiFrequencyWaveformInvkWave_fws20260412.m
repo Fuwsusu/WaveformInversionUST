@@ -82,8 +82,8 @@ alpha_floor        = 1e-8;        % 步长下限，避免数值退化为零步
 % alpha_hv：SoS 更新阶段的相位权重
 %   0.0 = 纯幅度（退化为 L2 幅度版）
 %   1.0 = 纯相位（对周期跳跃最鲁棒，但完全忽略幅度匹配）
-%   建议起点：0.7（强调相位约束声速；消融可测试 [0.3, 0.5, 0.7, 0.9]）
-alpha_hv = 0.7;
+%   建议起点：0.5（折中相位/幅度约束；消融可测试 [0.3, 0.5, 0.7, 0.9]）
+alpha_hv = 0.5;
 
 % alpha_hv_atten：衰减更新阶段的相位权重
 %   衰减主要由幅度约束，应降低相位权重；建议起点：0.3
@@ -142,12 +142,12 @@ f_stage2_cutoff  = 0.850e6;  % 阶段2/3分界 [Hz]（≈Mid段末，对应 fDAT
 %             reg_grad = lambda_tv · (-div(∇v / |∇v|_Huber))
 %           Huber平滑（eps_tv 参数）避免 |∇v|→0 时梯度奇异。
 %           真实声速边界处 |∇v| 大，TV惩罚自动降权，边界保留性优于Laplacian。
-%           [修改] 相对归一化消除量纲不匹配；lambda_tv 提高至 2e-3 以增强环状伪影抑制。
+%           [修改] 相对归一化消除量纲不匹配；lambda_tv 提高至 3e-3 以增强细粒噪声与环状伪影抑制。
 %           与方向G（极坐标径向TV）同时开启，两者协同压制同心环。
-% lambda_tv：TV强度（归一化后含义；消融可测试 [1e-3, 2e-3, 5e-3]）
+% lambda_tv：TV强度（归一化后含义；消融可测试 [1e-3, 3e-3, 5e-3]）
 % eps_tv：Huber平滑参数（建议 1e-3~1e-2；越小越接近纯TV，越大越接近L2平滑）
 enableTV  = true;     % true=开启各向同性TV；false=关闭
-lambda_tv = 2e-3;     % TV强度（归一化后：2.0%数据梯度；消融可测试 [1e-3, 2e-3, 5e-3]）
+lambda_tv = 3e-3;     % TV强度（归一化后：3.0%数据梯度；消融可测试 [1e-3, 3e-3, 5e-3]）
 eps_tv    = 1e-3;     % Huber平滑参数（建议 1e-3~1e-2）
 % -----------------------------------------------------------------------
 
@@ -1640,11 +1640,12 @@ legend('Location','best');
 xlim([xi_original(1), xi_original(end)]);
 ylim(crange);
 
-%% ===================== Quantitative Metrics (PSNR / CNR / SSIM / RD) =====================
+%% ===================== Quantitative Metrics (PSNR / RMSE / SSIM / RD) =====================
 % 说明：
 % 1) 为保证与重建网格一致，先将真值 C 插值到 (xi_original, yi_original)
 % 2) 目标/背景区域由真值相对背景声速偏差自动生成（分位数阈值）
-% 3) RD 采用图中定义：|c_recon - c_true| / |c_bkgnd - c_true| * 100%
+% 3) RD 采用图中定义的 ROI 向量范数形式：
+%    RD = ||c_recon - c_true|| / ||c_bkgnd - c_true|| * 100%
 
 % --- 可调参数（用于目标/背景掩膜自动生成） ---
 targetDevPct = 85;   % 偏差绝对值 >= P85 视为目标区域
@@ -1686,7 +1687,7 @@ else
                ((mu_t^2 + mu_r^2 + C1_ssim) * (var_t + var_r + C2_ssim));
 end
 
-% --- CNR / RD 需要目标与背景区域 ---
+% --- RD 需要目标与背景区域（CNR已替换为RMSE） ---
 bg_ref = median(C_true_on_reconGrid(valid_mask), 'omitnan');
 dev_true = abs(C_true_on_reconGrid - bg_ref);
 dev_valid = dev_true(valid_mask);
@@ -1704,29 +1705,23 @@ if nnz(bg_mask) < 10
     bg_mask = valid_mask & (abs(C_true_on_reconGrid - bg_ref) <= bg_ref_tol);
 end
 
+RMSE_val = sqrt(mse_vel);
+
 if nnz(target_mask) > 1 && nnz(bg_mask) > 1
     target_recon = VEL_ESTIM(target_mask);
-    bg_recon     = VEL_ESTIM(bg_mask);
     target_true  = C_true_on_reconGrid(target_mask);
+    c_bkgnd_scalar = mean(VEL_ESTIM(bg_mask));
 
-    mu_target = mean(target_recon);
-    mu_bg     = mean(bg_recon);
-    std_target = std(target_recon, 1);
-    std_bg     = std(bg_recon, 1);
-    CNR_val = abs(mu_target - mu_bg) / max(sqrt(std_target^2 + std_bg^2), eps);
-
-    c_recon = mu_target;
-    c_true  = mean(target_true);
-    c_bkgnd = mu_bg;
-    RD_percent = abs(c_recon - c_true) / max(abs(c_bkgnd - c_true), eps) * 100;
+    numerator_RD   = norm(target_recon - target_true);
+    denominator_RD = norm(c_bkgnd_scalar - target_true);
+    RD_percent = numerator_RD / max(denominator_RD, eps) * 100;
 else
-    CNR_val    = nan;
     RD_percent = nan;
 end
 
 fprintf('\n================ 定量指标 (SoS) ================\n');
 fprintf('PSNR : %.4f dB\n', PSNR_dB);
-fprintf('CNR  : %.6f\n', CNR_val);
+fprintf('RMSE : %.6f m/s\n', RMSE_val);
 fprintf('SSIM : %.6f\n', SSIM_val);
 fprintf('RD   : %.4f %%\n', RD_percent);
 fprintf('目标像素数: %d, 背景像素数: %d\n', nnz(target_mask), nnz(bg_mask));
@@ -1796,7 +1791,7 @@ save(filename_results, '-v7.3', ...
     'edge_blend_base','edge_blend_max','edge_contam_rise_ratio', ...
     'ring_bg_inner_ratio','ring_bg_outer_ratio', ...
     'mainLoopElapsedSec', 'scriptElapsedSec', ...
-    'PSNR_dB','CNR_val','SSIM_val','RD_percent', ...
+    'PSNR_dB','RMSE_val','SSIM_val','RD_percent', ...
     'targetDevPct','bgDevPct','bg_ref_tol');
 
 % [修改] 三阶段参考模型追加保存（变量存在时才追加，避免未进入对应阶段时报错）
