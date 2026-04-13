@@ -142,12 +142,12 @@ f_stage2_cutoff  = 0.850e6;  % 阶段2/3分界 [Hz]（≈Mid段末，对应 fDAT
 %             reg_grad = lambda_tv · (-div(∇v / |∇v|_Huber))
 %           Huber平滑（eps_tv 参数）避免 |∇v|→0 时梯度奇异。
 %           真实声速边界处 |∇v| 大，TV惩罚自动降权，边界保留性优于Laplacian。
-%           [修改] 相对归一化消除量纲不匹配；lambda_tv 提高至 3e-3 以增强细粒噪声与环状伪影抑制。
+%           [修改] 相对归一化消除量纲不匹配；lambda_tv 提高至 2e-2 以便先验证TV约束确实生效。
 %           与方向G（极坐标径向TV）同时开启，两者协同压制同心环。
-% lambda_tv：TV强度（归一化后含义；消融可测试 [1e-3, 3e-3, 5e-3]）
+% lambda_tv：TV强度（归一化后含义；诊断可测试 [2e-3, 2e-2, 5e-2]）
 % eps_tv：Huber平滑参数（建议 1e-3~1e-2；越小越接近纯TV，越大越接近L2平滑）
 enableTV  = true;     % true=开启各向同性TV；false=关闭
-lambda_tv = 3e-3;     % TV强度（归一化后：3.0%数据梯度；消融可测试 [1e-3, 3e-3, 5e-3]）
+lambda_tv = 2e-2;     % TV强度（归一化后：2.0e-2；用于诊断约束是否被“吃掉”）
 eps_tv    = 1e-3;     % Huber平滑参数（建议 1e-3~1e-2）
 % -----------------------------------------------------------------------
 
@@ -165,6 +165,13 @@ eps_tv    = 1e-3;     % Huber平滑参数（建议 1e-3~1e-2）
 enablePolarReg = true;     % true=开启极坐标径向TV；false=关闭
 lambda_polar   = 2e-3;     % 径向TV强度（归一化后：2.0%数据梯度；消融可测试 [1e-3, 2e-3, 5e-3]）
 eps_polar_reg  = 1e-3;     % Huber平滑参数（建议 1e-3~1e-2）
+% -----------------------------------------------------------------------
+
+% ------------------ fws: 正则化贡献诊断打印 ------------------
+% 用于确认“约束项是否真正影响了最终梯度方向”：
+%   true  : 每次迭代打印 LF/TV/Polar/Edge 的峰值及相对数据梯度占比
+%   false : 关闭诊断输出（默认建议）
+enableRegDiagPrint = true;
 % -----------------------------------------------------------------------
 
 % ------------------ fws: 高频更新可信度监控与门控 ------------------
@@ -1089,6 +1096,15 @@ for f_idx = 1:numel(fDATA)
             gradient_img = gradient_img ./ (illum_norm + eps_illum);
         end
 
+        % Remove Ringing from Data Gradient (先滤数据梯度，再叠加正则，避免正则被低通抹掉)
+        gradient_img = ringingRemovalFilt(xi_original, yi_original, ...
+            gradient_img, c0, fDATA(f_idx), cutoff, ord);
+        data_grad_peak_base = max(abs(gradient_img(:))) + eps;
+        reg_lf_peak    = 0;
+        reg_tv_peak    = 0;
+        reg_polar_peak = 0;
+        reg_edge_peak  = 0;
+
         % [修改] ---- 三阶段低频先验正则化梯度项（方向E）----
         % 根据当前频率所处阶段，选择对应的参考模型施加 Tikhonov 约束：
         %   阶段2（f_stage1 < f ≤ f_stage2）：约束拉向 VEL_stage1_ref
@@ -1120,6 +1136,7 @@ for f_idx = 1:numel(fDATA)
                 lf_diff_scale = max(abs(lf_diff(:))) + eps;            % 速度差幅值锚点
                 lf_prior_reg  = -lambda_k * grad_scale_lf * (lf_diff / lf_diff_scale);
                 gradient_img  = gradient_img + lf_prior_reg;
+                reg_lf_peak   = max(abs(lf_prior_reg(:)));
             end
         end
         % -----------------------------------------------------------------------
@@ -1141,7 +1158,9 @@ for f_idx = 1:numel(fDATA)
             div_term_tv    = dpx_x + dpy_y;                           % div(∇v/|∇v|_Huber) [1/m]
             grad_scale_tv  = max(abs(gradient_img(:))) + eps;         % 数据梯度幅值锚点（含LF prior后）
             div_tv_scale   = max(abs(div_term_tv(:))) + eps;          % TV散度幅值锚点
-            gradient_img   = gradient_img + lambda_tv * grad_scale_tv * (-div_term_tv / div_tv_scale);
+            tv_reg_term    = lambda_tv * grad_scale_tv * (-div_term_tv / div_tv_scale);
+            gradient_img   = gradient_img + tv_reg_term;
+            reg_tv_peak    = max(abs(tv_reg_term(:)));
         end
         % -----------------------------------------------------------------------
 
@@ -1186,7 +1205,9 @@ for f_idx = 1:numel(fDATA)
                         lambda_polar * lambda_polar_gate_boost);
                 end
             end
-            gradient_img   = gradient_img + lambda_polar_eff * grad_scale_pol * (-div_r / div_r_scale);
+            polar_reg_term = lambda_polar_eff * grad_scale_pol * (-div_r / div_r_scale);
+            gradient_img   = gradient_img + polar_reg_term;
+            reg_polar_peak = max(abs(polar_reg_term(:)));
         else
             lambda_polar_eff = 0;
         end
@@ -1212,13 +1233,20 @@ for f_idx = 1:numel(fDATA)
             lambda_edge_eff = lambda_edge_anchor * (f_edge_guard_start / fDATA(f_idx))^2;
             edge_anchor_reg = -lambda_edge_eff * grad_scale_edge * (edge_diff / edge_scale);
             gradient_img = gradient_img + edge_anchor_reg;
+            reg_edge_peak = max(abs(edge_anchor_reg(:)));
             edge_contam_k = mean(abs(edge_diff(edge_outer_mask)), 'omitnan');
         end
         % -----------------------------------------------------------------------
 
-        % Remove Ringing from Gradient Image
-        gradient_img = ringingRemovalFilt(xi_original, yi_original, ...
-            gradient_img, c0, fDATA(f_idx), cutoff, ord);
+        if enableRegDiagPrint
+            fprintf(['[RegDiag][f=%.3fMHz][iter=%d] base=%.3e | LF=%.3e(%.2f%%) ' ...
+                '| TV=%.3e(%.2f%%) | Polar=%.3e(%.2f%%) | Edge=%.3e(%.2f%%)\n'], ...
+                fDATA(f_idx)/1e6, iter, data_grad_peak_base, ...
+                reg_lf_peak,    100*reg_lf_peak/data_grad_peak_base, ...
+                reg_tv_peak,    100*reg_tv_peak/data_grad_peak_base, ...
+                reg_polar_peak, 100*reg_polar_peak/data_grad_peak_base, ...
+                reg_edge_peak,  100*reg_edge_peak/data_grad_peak_base);
+        end
 
         % % Step 2: Compute New Conjugate Gradient Search Direction from Gradient
         % % Conjugate Gradient Direction Scaling Factor for Updates
