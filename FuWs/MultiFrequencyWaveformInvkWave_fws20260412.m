@@ -75,7 +75,7 @@ optimizerType      = 'CG_PR_FR';  % 目前支持: 'CG_PR_FR'
 target_dv_per_iter = [];          % []或<=0: 自动估计；>0: 手动指定每步max|Δv| [m/s]
 auto_dv_ratio      = 3e-3;        % 自动模式: 目标Δv = auto_dv_ratio*mean(VEL_ESTIM)（建议2e-3~8e-3）
 auto_dv_min        = 1.0;         % 自动模式下限 [m/s]
-auto_dv_max        = 15.0;        % 自动模式上限 [m/s]
+auto_dv_max        = 50.0;        % 自动模式上限 [m/s]
 alpha_floor        = 1e-8;        % 步长下限，避免数值退化为零步
 % --------------------------------------------------------------
 
