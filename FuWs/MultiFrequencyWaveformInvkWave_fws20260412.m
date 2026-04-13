@@ -1621,7 +1621,7 @@ title(sprintf('Estimated SOS with horizontal line (y = %.1f mm)', yi_original(iy
 % ------------------ 右图：轮廓曲线 ------------------
 subplot(1,2,2);
 plot(xi_orig,     vel_prof_true, 'k-',  'LineWidth', 2.0, 'DisplayName', 'True'); hold on;
-plot(xi_original, vel_prof_est,  'r--', 'LineWidth', 1.8, 'DisplayName', 'Estimated');
+plot(xi_original, vel_prof_est,  'r-', 'LineWidth', 1.8, 'DisplayName', 'Estimated');
 
 if showStageRefs
     if has_stage1
@@ -1639,6 +1639,31 @@ title(sprintf('Horizontal SOS profile at y = %.1f mm', yi_original(iy_coarse)*1e
 legend('Location','best');
 xlim([xi_original(1), xi_original(end)]);
 ylim(crange);
+
+%% ===================== Image Quality Evaluation (SOS) =====================
+% 针对最终 SOS 重建，给出可行且常用的图像质量评估参数：
+% 1) MAE / RMSE / NRMSE：整体误差
+% 2) PSNR：峰值信噪比（越大越好）
+% 3) SSIM：结构相似性（越接近1越好）
+% 4) CNR：目标区与背景区对比噪声比（越大越好）
+%
+% 说明：为保证公平比较，先把估计图像插值到真值网格 (xi_orig, yi_orig)。
+[Xq_true, Yq_true] = meshgrid(xi_orig, yi_orig);
+VEL_ESTIM_on_true = interp2(xi_original, yi_original, VEL_ESTIM, ...
+                            Xq_true, Yq_true, 'linear', 'extrap');
+
+[iqa_sos, iqa_masks] = computeSOSMetrics(VEL_ESTIM_on_true, C);
+
+fprintf('\n================ SOS 图像质量评估 ================\n');
+fprintf('MAE        : %.4f m/s\n', iqa_sos.MAE);
+fprintf('RMSE       : %.4f m/s\n', iqa_sos.RMSE);
+fprintf('NRMSE      : %.4f %%\n', iqa_sos.NRMSE_pct);
+fprintf('PSNR       : %.4f dB\n', iqa_sos.PSNR_dB);
+fprintf('SSIM       : %.4f\n', iqa_sos.SSIM);
+fprintf('CNR(target/background): %.4f\n', iqa_sos.CNR);
+fprintf('Target pixels: %d | Background pixels: %d\n', ...
+    iqa_masks.numTarget, iqa_masks.numBackground);
+fprintf('===================================================\n\n');
 
 %% ===================== Save =====================
 suffix = 'WaveformInversionResults';
@@ -1703,6 +1728,7 @@ save(filename_results, '-v7.3', ...
     'lambda_edge_anchor','edge_step_damp_max', ...
     'edge_blend_base','edge_blend_max','edge_contam_rise_ratio', ...
     'ring_bg_inner_ratio','ring_bg_outer_ratio', ...
+    'VEL_ESTIM_on_true','iqa_sos','iqa_masks', ...
     'mainLoopElapsedSec', 'scriptElapsedSec');
 
 % [修改] 三阶段参考模型追加保存（变量存在时才追加，避免未进入对应阶段时报错）
@@ -1741,4 +1767,59 @@ function w = keysCubicWeights(alpha, a)
             w(i) = 0;
         end
     end
+end
+
+function [metrics, masks] = computeSOSMetrics(estSOS, trueSOS)
+    % 输入: estSOS / trueSOS 尺寸相同 [Ny, Nx]
+    % 输出: metrics 结构体 + 自动分割得到的 target/background 掩膜信息
+    err = estSOS - trueSOS;
+    absErr = abs(err);
+
+    metrics.MAE  = mean(absErr(:));
+    metrics.RMSE = sqrt(mean(err(:).^2));
+
+    dynRange = max(trueSOS(:)) - min(trueSOS(:));
+    dynRange = max(dynRange, eps);
+    metrics.NRMSE_pct = 100 * metrics.RMSE / dynRange;
+    metrics.PSNR_dB   = 20 * log10(dynRange / max(metrics.RMSE, eps));
+    metrics.SSIM      = computeGlobalSSIM(estSOS, trueSOS);
+
+    % --- 自动生成 target/background 掩膜用于 CNR ---
+    % 用真值图像相对背景偏差来定义 target，避免人工ROI依赖。
+    medVal = median(trueSOS(:));
+    devMap = abs(trueSOS - medVal);
+    thr = mean(devMap(:)) + 1.0 * std(devMap(:));  % 保守阈值
+    targetMask = devMap >= thr;
+
+    % 若目标像素过少，回退到分位数阈值
+    if nnz(targetMask) < max(20, round(0.005 * numel(trueSOS)))
+        thr2 = prctile(devMap(:), 90);
+        targetMask = devMap >= thr2;
+    end
+
+    backgroundMask = ~targetMask;
+    mu_t = mean(estSOS(targetMask));
+    mu_b = mean(estSOS(backgroundMask));
+    sig_t = std(estSOS(targetMask));
+    sig_b = std(estSOS(backgroundMask));
+    metrics.CNR = abs(mu_t - mu_b) / sqrt(sig_t^2 + sig_b^2 + eps);
+
+    masks.targetMask = targetMask;
+    masks.backgroundMask = backgroundMask;
+    masks.numTarget = nnz(targetMask);
+    masks.numBackground = nnz(backgroundMask);
+end
+
+function ssimVal = computeGlobalSSIM(A, B)
+    % 简化全局 SSIM（不依赖工具箱），适合迭代结果快速量化对比
+    A = double(A); B = double(B);
+    muA = mean(A(:)); muB = mean(B(:));
+    varA = var(A(:), 1); varB = var(B(:), 1);   % 总体方差
+    covAB = mean((A(:)-muA).*(B(:)-muB));
+    L = max(B(:)) - min(B(:));
+    L = max(L, eps);
+    C1 = (0.01 * L)^2;
+    C2 = (0.03 * L)^2;
+    ssimVal = ((2*muA*muB + C1) * (2*covAB + C2)) / ...
+              ((muA^2 + muB^2 + C1) * (varA + varB + C2));
 end
