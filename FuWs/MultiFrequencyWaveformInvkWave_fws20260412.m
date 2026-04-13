@@ -43,6 +43,15 @@ virtualElementsMode   = 'unilateral';  % 'unilateral' = 单侧交替（128→256
 verTag                = 'V3_5';        % 保存版本号
 % ----------------------------------------------------------------------
 
+% ------------------ fws: 轮间高斯平滑（Round1 -> Round2） ------------------
+% 目的：第一轮结束后仅对“模型”做一次高斯低通，作为第二轮初值，抑制沙感噪声。
+% 注意：这不是“每次迭代平滑梯度”，不会干扰伴随梯度计算流程。
+enableInterRoundGaussian = true;        % true=第一轮结束自动生成平滑初值
+gaussSigmaScale          = 1.0;         % sigma倍率（1.0=半波长准则）
+loadRound2InitFromFile   = false;       % true=从 round2InitMatPath 载入初值覆盖 c_init
+round2InitMatPath        = '';          % 例如 'D:\...\VEL_round2_init.mat'
+% ----------------------------------------------------------------------
+
 % ------------------ fws: Near-end exclusion ------------------
 exclMode  = 'frac';   % 'angle' | 'frac'
 frac_excl = 1/4;
@@ -768,6 +777,23 @@ fprintf('======================\n\n');
 % Initial Constant Sound Speed Map [m/s]
 c_init = 1480; % Initial Homogeneous Sound Speed [m/s] Guess
 VEL_INIT   = c_init*ones(Nyi,Nxi);
+
+% 可选：第二轮脚本从“轮间高斯平滑模型”启动
+if loadRound2InitFromFile
+    if isempty(round2InitMatPath)
+        error('loadRound2InitFromFile=true 时，round2InitMatPath 不能为空。');
+    end
+    tmp_round2 = load(round2InitMatPath);
+    if ~isfield(tmp_round2, 'VEL_round2_init')
+        error('文件 %s 中未找到变量 VEL_round2_init。', round2InitMatPath);
+    end
+    if ~isequal(size(tmp_round2.VEL_round2_init), [Nyi, Nxi])
+        error('VEL_round2_init 尺寸不匹配：期望 [%d,%d]，实际 [%d,%d]。', ...
+            Nyi, Nxi, size(tmp_round2.VEL_round2_init,1), size(tmp_round2.VEL_round2_init,2));
+    end
+    VEL_INIT = tmp_round2.VEL_round2_init;
+    fprintf('[Round2 init] 已载入平滑初值: %s\n', round2InitMatPath);
+end
 
 % Initial Constant Attenuation [Np/(Hz m)]
 ATTEN_INIT = 0*alphaNp*ones(Nyi,Nxi);
@@ -1600,6 +1626,25 @@ xlim(crange); ylim([yi_original(1), yi_original(end)]);
 
 scriptElapsedSec = toc(scriptTimer);
 fprintf('整个脚本总时长: %.2f 秒 (%.2f 分钟)\n', scriptElapsedSec, scriptElapsedSec/60);
+
+%% ===================== Inter-round Gaussian Init Export =====================
+% 第一轮结束后，将最终速度图做一次高斯平滑，导出给第二轮作为初始模型。
+if enableInterRoundGaussian
+    f_last = fDATA_SoS(end);
+    lambda_last = c_init / f_last;
+    sigma_gauss = gaussSigmaScale * lambda_last / (2 * dxi_original);
+    r_g = max(1, ceil(3 * sigma_gauss));
+    [xx_g, yy_g] = meshgrid(-r_g:r_g, -r_g:r_g);
+    ker_g = exp(-(xx_g.^2 + yy_g.^2) / (2 * sigma_gauss^2));
+    ker_g = ker_g / (sum(ker_g(:)) + eps);
+    VEL_round2_init = conv2(VEL_ESTIM, ker_g, 'same');
+
+    round2_init_path = [result_dir, filename, '_', verTag, '_VEL_round2_init.mat'];
+    save(round2_init_path, 'VEL_round2_init', 'sigma_gauss', 'lambda_last', 'f_last', 'dxi_original');
+    fprintf(['[Round1->Round2] 已导出高斯平滑初值: %s\n' ...
+             '  f_last=%.3f MHz, lambda_last=%.3f mm, sigma=%.3f grid\n'], ...
+            round2_init_path, f_last/1e6, lambda_last*1e3, sigma_gauss);
+end
 
 %% ===================== Horizontal Sound Speed Profile (contour line) =====================
 % 参考 Long et al. (2023) Fig.6: 在SOS图上给出一条水平切线，
