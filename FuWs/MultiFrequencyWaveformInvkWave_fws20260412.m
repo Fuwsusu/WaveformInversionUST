@@ -1621,7 +1621,7 @@ title(sprintf('Estimated SOS with horizontal line (y = %.1f mm)', yi_original(iy
 % ------------------ 右图：轮廓曲线 ------------------
 subplot(1,2,2);
 plot(xi_orig,     vel_prof_true, 'k-',  'LineWidth', 2.0, 'DisplayName', 'True'); hold on;
-plot(xi_original, vel_prof_est,  'r--', 'LineWidth', 1.8, 'DisplayName', 'Estimated');
+plot(xi_original, vel_prof_est,  'r-',  'LineWidth', 1.8, 'DisplayName', 'Estimated');
 
 if showStageRefs
     if has_stage1
