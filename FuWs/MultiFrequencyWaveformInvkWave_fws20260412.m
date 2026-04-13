@@ -229,6 +229,13 @@ gif_save_every = 1;       % 每隔多少次迭代保存一帧（1=每次，2=隔
 % GIF 路径将在 result_dir 定义后自动生成（见主循环前）
 % -----------------------------------------------
 
+% ------------------ 失配曲线显示 ------------------
+% enableMisfitCurve=true 时，实时显示 Φ(失配函数) 随迭代的变化曲线
+% 便于观察：是否单调下降、在哪些频段下降变慢、门控后是否恢复下降
+enableMisfitCurve = true;
+misfitCurveFigId  = 77;
+% -------------------------------------------------
+
 % Red-Blue colormap (blue=low, red=high)
 % Soft Blue-White-Red diverging colormap
 n_cmap = 256; n2 = n_cmap/2;
@@ -853,6 +860,26 @@ if saveGIF
     xlabel(axgif, 'Lateral [m]');
     ylabel(axgif, 'Axial [m]');
 end
+
+% ---- 失配函数曲线窗口（主循环前创建，循环内只更新数据）----
+if enableMisfitCurve
+    hmisfit = figure(misfitCurveFigId);
+    set(hmisfit, 'Visible', 'on', 'Position', [780 100 700 460], ...
+        'Name', 'Misfit Curve Evolution');
+    axmisfit = axes('Parent', hmisfit);
+    hmisfit_line = plot(axmisfit, nan, nan, 'b-', 'LineWidth', 1.8, ...
+        'DisplayName', '\Phi_k');
+    hold(axmisfit, 'on');
+    hmisfit_now = plot(axmisfit, nan, nan, 'ro', 'MarkerSize', 6, ...
+        'MarkerFaceColor', 'r', 'DisplayName', 'Current');
+    hold(axmisfit, 'off');
+    grid(axmisfit, 'on');
+    xlabel(axmisfit, 'Iteration');
+    ylabel(axmisfit, '\Phi (misfit)');
+    title(axmisfit, sprintf('Misfit Evolution (%s)', misfitType), 'Interpreter', 'none');
+    legend(axmisfit, 'Location', 'northeast');
+end
+% ------------------------------------------------------------
 
 mainLoopTimer = tic;   % 主反演循环总时长（只统计迭代过程）
 % -------------------------------------------------------
@@ -1488,6 +1515,17 @@ for f_idx = 1:numel(fDATA)
         subplot(2,3,6); imagesc(xi_original, yi_original, -gradient_img); axis image; colorbar; colormap(cmap_rb);
         title(['Gradient ', num2str(iter)]); xlabel('Lateral [m]'); ylabel('Axial [m]');
         drawnow;
+
+        % ---- 失配函数曲线实时更新 ----
+        if enableMisfitCurve
+            valid_idx = find(~isnan(PHI_ITER));
+            set(hmisfit_line, 'XData', valid_idx, 'YData', PHI_ITER(valid_idx));
+            set(hmisfit_now,  'XData', iter, 'YData', PHI_ITER(iter));
+            title(axmisfit, sprintf('Misfit Evolution (%s) | iter=%d/%d | f=%.3f MHz', ...
+                misfitType, iter, Niter, fDATA(f_idx)/1e6), 'Interpreter', 'none');
+            drawnow limitrate nocallbacks;
+        end
+        % ----------------------------
 
         % ---- GIF 帧保存 ----
         % 复用预创建的 hgif/axgif/hgif_im，只更新 CData，不重建渲染链
