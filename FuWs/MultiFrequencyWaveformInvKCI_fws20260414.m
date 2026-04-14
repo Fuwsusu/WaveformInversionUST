@@ -147,11 +147,31 @@ crange = [1350, 1600]; % For reconstruction display [m/s]
 attenrange = 10*[-1,1]; % For reconstruction display [dB/(cm MHz)]
 c0 = mean(VEL_ESTIM(:)); cutoff = 0.75; ord = Inf; % Parameters for Ringing Removal Filter
 % Values to Save at Each Iteration
-Niter = sum(niterSoSPerFreq)+sum(niterAttenPerFreq);
+NiterPlanned = sum(niterSoSPerFreq)+sum(niterAttenPerFreq);
+maxTotalIter = NiterPlanned; % 可设置更小值以提前停止总迭代次数
+Niter = min(NiterPlanned, maxTotalIter);
 VEL_ESTIM_ITER = zeros(Nyi,Nxi,Niter);
 ATTEN_ESTIM_ITER = zeros(Nyi, Nxi, Niter);
 GRAD_IMG_ITER = zeros(Nyi,Nxi,Niter);
 SEARCH_DIR_ITER = zeros(Nyi,Nxi,Niter);
+ITER_TIME_SEC = zeros(1, Niter);
+ITER_CUM_TIME_SEC = zeros(1, Niter);
+TOTAL_TIME_SEC = 0;
+
+% Display and GIF Settings
+showRedBlueMap = true; % Search Direction和Gradient使用红蓝图
+saveGIF = true; % 保存迭代过程GIF
+gifFrameStride = 1; % 每隔多少次迭代保存一帧
+gifFilename = ['Results/', filename, '_WaveformInversion_', datestr(now,'yyyymmdd_HHMMSS'), '.gif'];
+if saveGIF
+    gifFolder = fileparts(gifFilename);
+    if ~isempty(gifFolder) && ~exist(gifFolder,'dir')
+        mkdir(gifFolder);
+    end
+end
+
+figRecon = figure('Name','Waveform Inversion Iterations','Color','w');
+stopAllIterations = false;
 for f_idx = 1:numel(fDATA)
     % Iterations at Each Frequency
     for iter_f_idx = 1:(niterSoSPerFreq(f_idx)+niterAttenPerFreq(f_idx))
@@ -159,6 +179,10 @@ for f_idx = 1:numel(fDATA)
         % Step 1: Accumulate Backprojection Over Each Element
         iter = iter_f_idx + sum(niterSoSPerFreq(1:f_idx-1)) + ...
             sum(niterAttenPerFreq(1:f_idx-1));
+        if iter > Niter
+            stopAllIterations = true;
+            break;
+        end
         % Reset CG at Each Frequency (SoS and Attenuation)
         if ((iter_f_idx == 1) || (iter_f_idx == 1+niterSoSPerFreq(f_idx)))
             search_dir = zeros(Nyi, Nxi); % Conjugate Gradient Direction
@@ -268,6 +292,7 @@ for f_idx = 1:numel(fDATA)
         GRAD_IMG_ITER(:,:,iter) = gradient_img;
         SEARCH_DIR_ITER(:,:,iter) = search_dir;
         % Visualize Numerical Solution
+        figure(figRecon);
         subplot(2,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
         title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
         xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
@@ -276,23 +301,79 @@ for f_idx = 1:numel(fDATA)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
         subplot(2,2,3); imagesc(xi,yi,search_dir)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
-        title(['Search Direction Iteration ', num2str(iter)]); colorbar; colormap gray; 
+        title(['Search Direction Iteration ', num2str(iter)]); colorbar;
+        if showRedBlueMap
+            colormap(gca, redBlueMap(256));
+        else
+            colormap(gca, gray);
+        end
         subplot(2,2,4); imagesc(xi,yi,-gradient_img)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
-        title(['Gradient Iteration ', num2str(iter)]); colorbar; colormap gray; 
-        drawnow; disp(['Iteration ', num2str(iter)]); toc;
+        title(['Gradient Iteration ', num2str(iter)]); colorbar;
+        if showRedBlueMap
+            colormap(gca, redBlueMap(256));
+        else
+            colormap(gca, gray);
+        end
+        drawnow;
+
+        % Save GIF
+        if saveGIF && mod(iter, gifFrameStride) == 0
+            frame = getframe(figRecon);
+            [imgIndexed, cmap] = rgb2ind(frame2im(frame), 256);
+            if iter == 1
+                imwrite(imgIndexed, cmap, gifFilename, 'gif', 'LoopCount', inf, 'DelayTime', 0.3);
+            else
+                imwrite(imgIndexed, cmap, gifFilename, 'gif', 'WriteMode', 'append', 'DelayTime', 0.3);
+            end
+        end
+
+        iterElapsed = toc;
+        TOTAL_TIME_SEC = TOTAL_TIME_SEC + iterElapsed;
+        ITER_TIME_SEC(iter) = iterElapsed;
+        ITER_CUM_TIME_SEC(iter) = TOTAL_TIME_SEC;
+        disp(['Iteration ', num2str(iter), ...
+            ' | Time: ', num2str(iterElapsed, '%.2f'), ' s', ...
+            ' | Cumulative: ', num2str(TOTAL_TIME_SEC, '%.2f'), ' s']);
     end
+    if stopAllIterations
+        break;
+    end
+end
+
+actualIter = find(ITER_CUM_TIME_SEC > 0, 1, 'last');
+if isempty(actualIter)
+    actualIter = 0;
+else
+    VEL_ESTIM_ITER = VEL_ESTIM_ITER(:,:,1:actualIter);
+    ATTEN_ESTIM_ITER = ATTEN_ESTIM_ITER(:,:,1:actualIter);
+    GRAD_IMG_ITER = GRAD_IMG_ITER(:,:,1:actualIter);
+    SEARCH_DIR_ITER = SEARCH_DIR_ITER(:,:,1:actualIter);
+    ITER_TIME_SEC = ITER_TIME_SEC(1:actualIter);
+    ITER_CUM_TIME_SEC = ITER_CUM_TIME_SEC(1:actualIter);
 end
 
 % Plot Final Reconstructions
 subplot(1,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
-title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
+title(['Estimated Wave Velocity ', num2str(actualIter)]); axis image;
 xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
 subplot(1,2,2); imagesc(xi,yi,Np2dB*slow2atten*ATTEN_ESTIM,attenrange); 
-title(['Estimated Attenuation ', num2str(iter)]); axis image;
+title(['Estimated Attenuation ', num2str(actualIter)]); axis image;
 xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
 
 % Save the Result to File
 filename_results = ['D:\文件ing\WaveformInversionUST\Results\', filename, '_WaveformInversionResults.mat'];
 save(filename_results, '-v7.3', 'xi', 'yi', 'fDATA', 'niterAttenPerFreq', ...
-    'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', 'SEARCH_DIR_ITER')
+    'niterSoSPerFreq', 'NiterPlanned', 'Niter', 'actualIter', ...
+    'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', 'SEARCH_DIR_ITER', ...
+    'ITER_TIME_SEC', 'ITER_CUM_TIME_SEC', 'TOTAL_TIME_SEC', 'gifFilename')
+
+function cmap = redBlueMap(n)
+if nargin < 1
+    n = 256;
+end
+nHalf = floor(n/2);
+blueToWhite = [linspace(0,1,nHalf)', linspace(0,1,nHalf)', ones(nHalf,1)];
+whiteToRed = [ones(n-nHalf,1), linspace(1,0,n-nHalf)', linspace(1,0,n-nHalf)'];
+cmap = [blueToWhite; whiteToRed];
+end
