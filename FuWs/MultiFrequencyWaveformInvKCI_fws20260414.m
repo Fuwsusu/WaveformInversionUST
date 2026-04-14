@@ -1,8 +1,23 @@
 clear
 clc
+scriptTimer = tic; % Total script runtime (s)
 
 % Add Functions to Path
 addpath(genpath('Functions'));
+
+% ------------------ Iteration/GIF/Display Controls ------------------
+runAllIterations = false; % true=run all iterations, false=stop at requestedIterations
+requestedIterations = 60; % Only effective when runAllIterations=false
+saveGIF = true;           % Save per-iteration velocity animation GIF
+gif_delay = 0.20;         % Delay time [s]
+gif_save_every = 1;       % Save every N-th iteration
+% Soft red-blue colormap (blue=low, red=high)
+n_cmap = 256; n2 = n_cmap/2;
+cmap_rb = [
+    linspace(0.17, 1.00, n2)', linspace(0.51, 1.00, n2)', linspace(0.83, 1.00, n2)';
+    linspace(1.00, 0.84, n2)', linspace(1.00, 0.18, n2)', linspace(1.00, 0.15, n2)'
+];
+% --------------------------------------------------------------------
 
 % Load Extracted Dataset
 filename = 'BenignCyst_sparse256'; % 'BenignCyst', 'Malignancy'
@@ -148,17 +163,42 @@ attenrange = 10*[-1,1]; % For reconstruction display [dB/(cm MHz)]
 c0 = mean(VEL_ESTIM(:)); cutoff = 0.75; ord = Inf; % Parameters for Ringing Removal Filter
 % Values to Save at Each Iteration
 Niter = sum(niterSoSPerFreq)+sum(niterAttenPerFreq);
+if requestedIterations >= Niter
+    runAllIterations = true;
+end
 VEL_ESTIM_ITER = zeros(Nyi,Nxi,Niter);
 ATTEN_ESTIM_ITER = zeros(Nyi, Nxi, Niter);
 GRAD_IMG_ITER = zeros(Nyi,Nxi,Niter);
 SEARCH_DIR_ITER = zeros(Nyi,Nxi,Niter);
+ITER_TIME_SEC = nan(1, Niter);
+PHI_ITER = nan(1, Niter);        % Data misfit (mean |residual|^2)
+DELTA_PHI_ITER = nan(1, Niter);  % Misfit decrease relative to previous iteration
+TAU_SHIFT_ITER = nan(1, Niter);  % Mean time-shift residual [s]
+prev_phi_k = nan;
+
+% GIF output config
+result_dir = 'D:\文件ing\WaveformInversionUST\Results\';
+gif_filepath = [result_dir, filename, '_WaveformInversionVEL_anim.gif'];
+gif_initialized = false;
+gif_iter_count = 0;
+if saveGIF
+    fprintf('[GIF] will save to: %s\n', gif_filepath);
+end
+mainLoopTimer = tic; % Main inversion loop runtime
 for f_idx = 1:numel(fDATA)
     % Iterations at Each Frequency
     for iter_f_idx = 1:(niterSoSPerFreq(f_idx)+niterAttenPerFreq(f_idx))
-        tic;
-        % Step 1: Accumulate Backprojection Over Each Element
         iter = iter_f_idx + sum(niterSoSPerFreq(1:f_idx-1)) + ...
             sum(niterAttenPerFreq(1:f_idx-1));
+        if iter_f_idx == 1
+            prev_phi_k = nan; % Reset quantitative trend at new frequency
+        end
+        if ~runAllIterations && (iter > requestedIterations)
+            fprintf('[STOP] reached requestedIterations=%d, stop inversion loop.\n', requestedIterations);
+            break;
+        end
+        tic;
+        % Step 1: Accumulate Backprojection Over Each Element
         % Reset CG at Each Frequency (SoS and Attenuation)
         if ((iter_f_idx == 1) || (iter_f_idx == 1+niterSoSPerFreq(f_idx)))
             search_dir = zeros(Nyi, Nxi); % Conjugate Gradient Direction
@@ -191,6 +231,9 @@ for f_idx = 1:numel(fDATA)
         % Build Adjoint Sources
         scaling = zeros(numel(tx_include), 1);
         ADJ_SRC = zeros(Nyi, Nxi, numel(tx_include));
+        phi_k_accum = 0;
+        tau_k_accum = 0;
+        tau_k_count = 0;
         for elmt_idx = 1:numel(tx_include)
             WVFIELD_elmt = WVFIELD(:,:,elmt_idx);
             REC_SIM = WVFIELD_elmt(ind(elemInclude(tx_include(elmt_idx),:))); 
@@ -202,6 +245,19 @@ for f_idx = 1:numel(fDATA)
             ADJ_SRC_elmt(ind(elemInclude(tx_include(elmt_idx),:))) = ...
                 scaling(elmt_idx)*REC_SIM - REC;
             ADJ_SRC(:,:,elmt_idx) = ADJ_SRC_elmt;
+            % Quantitative metrics (L2 misfit + mean phase-to-time residual)
+            residual = scaling(elmt_idx)*REC_SIM - REC;
+            phi_k_accum = phi_k_accum + sum(abs(residual).^2);
+            dphi_tau = angle((scaling(elmt_idx)*REC_SIM) .* conj(REC));
+            tau_k_accum = tau_k_accum + sum(abs(dphi_tau) / (2*pi*fDATA(f_idx)));
+            tau_k_count = tau_k_count + numel(dphi_tau);
+        end
+        phi_k = real(phi_k_accum) / max(tau_k_count, 1);
+        tau_k = tau_k_accum / max(tau_k_count, 1);
+        if ~isnan(prev_phi_k)
+            delta_phi_k = prev_phi_k - phi_k;
+        else
+            delta_phi_k = nan;
         end
         % Backproject Error
         ADJ_WVFIELD = HS.solve(ADJ_SRC,true);
@@ -270,29 +326,65 @@ for f_idx = 1:numel(fDATA)
         % Visualize Numerical Solution
         subplot(2,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
         title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
-        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
+        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
         subplot(2,2,2); imagesc(xi,yi,Np2dB*slow2atten*ATTEN_ESTIM,attenrange);
         title(['Estimated Attenuation ', num2str(iter)]); axis image;
-        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
+        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
         subplot(2,2,3); imagesc(xi,yi,search_dir)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
-        title(['Search Direction Iteration ', num2str(iter)]); colorbar; colormap gray; 
+        title(['Search Direction Iteration ', num2str(iter)]); colorbar; colormap(cmap_rb); 
         subplot(2,2,4); imagesc(xi,yi,-gradient_img)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
-        title(['Gradient Iteration ', num2str(iter)]); colorbar; colormap gray; 
-        drawnow; disp(['Iteration ', num2str(iter)]); toc;
+        title(['Gradient Iteration ', num2str(iter)]); colorbar; colormap(cmap_rb); 
+        drawnow;
+        iter_elapsed = toc;
+        ITER_TIME_SEC(iter) = iter_elapsed;
+        PHI_ITER(iter) = phi_k;
+        DELTA_PHI_ITER(iter) = delta_phi_k;
+        TAU_SHIFT_ITER(iter) = tau_k;
+        prev_phi_k = phi_k;
+        disp(['Iteration ', num2str(iter), ...
+            ' | Time ', num2str(iter_elapsed, '%.3f'), ' s', ...
+            ' | Phi ', num2str(phi_k, '%.3e'), ...
+            ' | dPhi ', num2str(delta_phi_k, '%.3e'), ...
+            ' | Tau(us) ', num2str(tau_k*1e6, '%.3f')]);
+
+        if saveGIF
+            gif_iter_count = gif_iter_count + 1;
+            if mod(gif_iter_count - 1, gif_save_every) == 0
+                frame = getframe(gcf);
+                [A, map] = rgb2ind(frame2im(frame), 256);
+                if ~gif_initialized
+                    imwrite(A, map, gif_filepath, 'gif', 'LoopCount', Inf, 'DelayTime', gif_delay);
+                    gif_initialized = true;
+                else
+                    imwrite(A, map, gif_filepath, 'gif', 'WriteMode', 'append', 'DelayTime', gif_delay);
+                end
+            end
+        end
+    end
+    if ~runAllIterations && (iter >= requestedIterations)
+        break;
     end
 end
 
 % Plot Final Reconstructions
 subplot(1,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
 title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
-xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
+xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
 subplot(1,2,2); imagesc(xi,yi,Np2dB*slow2atten*ATTEN_ESTIM,attenrange); 
 title(['Estimated Attenuation ', num2str(iter)]); axis image;
-xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
+xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
+
+if saveGIF && gif_initialized
+    fprintf('[GIF] saved: %s\n', gif_filepath);
+end
+mainLoopElapsedSec = toc(mainLoopTimer);
+scriptElapsedSec = toc(scriptTimer);
+fprintf('[TIME] main loop: %.3f s | total script: %.3f s\n', mainLoopElapsedSec, scriptElapsedSec);
 
 % Save the Result to File
 filename_results = ['D:\文件ing\WaveformInversionUST\Results\', filename, '_WaveformInversionResults.mat'];
 save(filename_results, '-v7.3', 'xi', 'yi', 'fDATA', 'niterAttenPerFreq', ...
-    'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', 'SEARCH_DIR_ITER')
+    'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', ...
+    'SEARCH_DIR_ITER', 'ITER_TIME_SEC', 'PHI_ITER', 'DELTA_PHI_ITER', 'TAU_SHIFT_ITER')
