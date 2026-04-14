@@ -173,7 +173,7 @@ SEARCH_DIR_ITER = zeros(Nyi,Nxi,Niter);
 ITER_TIME_SEC = nan(1, Niter);
 
 % GIF output config
-result_dir = 'D:\文件ing\WaveformInversionUST\Results\';
+result_dir = 'D:\Document_ING_fws\WaveformInversionUST\Results\start20260414\';
 gif_filepath = [result_dir, filename, '_WaveformInversionVEL_anim.gif'];
 gif_initialized = false;
 gif_iter_count = 0;
