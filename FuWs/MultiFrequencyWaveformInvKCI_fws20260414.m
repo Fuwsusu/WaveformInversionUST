@@ -188,7 +188,19 @@ gif_filepath = [result_dir, filename, '_WaveformInversionVEL_anim.gif'];
 gif_initialized = false;
 gif_iter_count = 0;
 if saveGIF
+    if ~exist(result_dir, 'dir')
+        mkdir(result_dir);
+    end
     fprintf('[GIF] will save to: %s\n', gif_filepath);
+    hgif = figure(99);
+    set(hgif, 'Visible', 'on', 'Position', [100 100 640 560]);
+    axgif = axes('Parent', hgif);
+    hgif_im = imagesc(axgif, xi, yi, VEL_ESTIM, crange);
+    axis(axgif, 'image');
+    colorbar(axgif);
+    colormap(axgif, cmap_rb);
+    xlabel(axgif, 'Lateral [m]');
+    ylabel(axgif, 'Axial [m]');
 end
 mainLoopTimer = tic; % Main inversion loop runtime
 for f_idx = 1:numel(fDATA)
@@ -332,8 +344,12 @@ for f_idx = 1:numel(fDATA)
         if saveGIF
             gif_iter_count = gif_iter_count + 1;
             if mod(gif_iter_count - 1, gif_save_every) == 0
-                frame = getframe(gcf);
-                [A, map] = rgb2ind(frame2im(frame), 256);
+                title(axgif, sprintf('Estimated Wave Velocity | iter=%d | f=%.3f MHz | %s', ...
+                    iter, fDATA(f_idx)/1e6, ternary(updateAttenuation, 'SoS+Atten', 'SoS')));
+                set(hgif_im, 'CData', VEL_ESTIM);
+                drawnow limitrate nocallbacks;
+                frame = getframe(hgif);
+                [A, map] = rgb2ind(frame2im(frame), 128);
                 if ~gif_initialized
                     imwrite(A, map, gif_filepath, 'gif', 'LoopCount', Inf, 'DelayTime', gif_delay);
                     gif_initialized = true;
@@ -473,6 +489,21 @@ end
 
 if saveGIF && gif_initialized
     fprintf('[GIF] saved: %s\n', gif_filepath);
+    try
+        [gifFrame, gifMap] = imread(gif_filepath, 'gif', 'Frames', 1);
+        figure(100); clf;
+        imshow(gifFrame, gifMap);
+        title('Saved GIF preview (first frame)');
+        if exist('implay', 'file') == 2
+            implay(gif_filepath);
+        end
+    catch ME
+        if isempty(ME.identifier)
+            warning('GIF:PreviewFailed', '%s', ME.message);
+        else
+            warning(ME.identifier, '%s', ME.message);
+        end
+    end
 end
 mainLoopElapsedSec = toc(mainLoopTimer);
 scriptElapsedSec = toc(scriptTimer);
@@ -483,3 +514,11 @@ filename_results = ['D:\Document_ING_fws\WaveformInversionUST\Results\start20260
 save(filename_results, '-v7.3', 'xi', 'yi', 'fDATA', 'niterAttenPerFreq', ...
     'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', ...
     'SEARCH_DIR_ITER', 'ITER_TIME_SEC')
+
+function out = ternary(cond, valTrue, valFalse)
+if cond
+    out = valTrue;
+else
+    out = valFalse;
+end
+end
