@@ -207,6 +207,10 @@ end
 stopNow = false;             % early-stop flag
 %% --------------------------------------------
 
+% 主显示窗口（避免与 GIF 窗口互相覆盖导致句柄失效）
+hmain = figure(1);
+set(hmain, 'Visible','on', 'Position',[760 100 1100 700]);
+
 % ---------- 路径 & GIF 初始化 ----------
 result_dir = 'D:\Document_ING_fws\WaveformInversionUST\Results\start20260303\';
 if ~exist(result_dir,'dir'), mkdir(result_dir); end
@@ -359,6 +363,7 @@ for f_idx = 1:numel(fDATA)
         GRAD_IMG_ITER(:,:,iter) = gradient_img;
         SEARCH_DIR_ITER(:,:,iter) = search_dir;
         % Visualize Numerical Solution
+        figure(hmain);
         subplot(2,3,1); imagesc(xi,yi,VEL_ESTIM,crange);
         title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
         xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
@@ -383,7 +388,18 @@ for f_idx = 1:numel(fDATA)
         if saveGIF
             gif_iter_count = gif_iter_count + 1;
             if mod(gif_iter_count - 1, gif_save_every) == 0
-                set(hgif_im, 'CData', VEL_ESTIM);
+                % 若用户手动关闭了 GIF 窗口/坐标轴，自动重建句柄
+                if ~ishandle(hgif) || ~isgraphics(hgif,'figure') || ...
+                        ~isgraphics(axgif,'axes') || ~isgraphics(hgif_im,'image')
+                    hgif = figure(99);
+                    set(hgif, 'Visible','on', 'Position',[100 100 640 560]);
+                    axgif = axes('Parent', hgif);
+                    hgif_im = imagesc(axgif, xi, yi, VEL_ESTIM, crange);
+                    axis(axgif, 'image'); colorbar(axgif); colormap(axgif, cmap_rb);
+                    xlabel(axgif, 'Lateral [m]'); ylabel(axgif, 'Axial [m]');
+                else
+                    set(hgif_im, 'CData', VEL_ESTIM);
+                end
                 if updateAttenuation
                     pass_tag = 'SoS+Atten';
                 else
@@ -412,6 +428,7 @@ for f_idx = 1:numel(fDATA)
 end
 
 % Plot Final Reconstructions
+figure(hmain);
 subplot(2,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
 title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
 xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
