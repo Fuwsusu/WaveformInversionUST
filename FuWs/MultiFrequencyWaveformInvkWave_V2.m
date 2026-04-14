@@ -4,6 +4,18 @@ clc
 % Add Functions to Path
 addpath(genpath('Functions'));
 
+% Red-Blue colormap (blue=low, red=high)
+n_cmap = 256; n2 = n_cmap/2;
+cmap_rb = [
+    linspace(0.17, 1.00, n2)', linspace(0.51, 1.00, n2)', linspace(0.83, 1.00, n2)';
+    linspace(1.00, 0.84, n2)', linspace(1.00, 0.18, n2)', linspace(1.00, 0.15, n2)'
+];
+
+% GIF 保存设置
+saveGIF        = true;
+gif_delay      = 0.20;
+gif_save_every = 1;
+
 % Load Extracted Dataset
 filename = 'kWave_CirclePhantom4_256'; % 'kWave_BreastCT', 'kWave_BreastMRI'
 load(['D:\Document_ING_fws\WaveformInversionUST\Simulations\datasets\', filename, '.mat'], ...
@@ -194,6 +206,24 @@ end
 stopNow = false;             % early-stop flag
 %% --------------------------------------------
 
+% ---------- 路径 & GIF 初始化 ----------
+result_dir = 'D:\Document_ING_fws\WaveformInversionUST\Results\start20260303\';
+if ~exist(result_dir,'dir'), mkdir(result_dir); end
+
+if saveGIF
+    gif_filepath = [result_dir, filename, '_V2_VEL_anim.gif'];
+    fprintf('[GIF] 将保存至: %s\n', gif_filepath);
+    gif_initialized = false;
+    gif_iter_count  = 0;
+    hgif = figure(99);
+    set(hgif, 'Visible','on', 'Position',[100 100 640 560]);
+    axgif = axes('Parent', hgif);
+    hgif_im = imagesc(axgif, xi, yi, VEL_ESTIM, crange);
+    axis(axgif, 'image'); colorbar(axgif); colormap(axgif, cmap_rb);
+    xlabel(axgif, 'Lateral [m]'); ylabel(axgif, 'Axial [m]');
+end
+% --------------------------------------
+
 for f_idx = 1:numel(fDATA)
     % Iterations at Each Frequency
     for iter_f_idx = 1:(niterSoSPerFreq(f_idx)+niterAttenPerFreq(f_idx))
@@ -269,7 +299,7 @@ for f_idx = 1:numel(fDATA)
                 imagesc(xi,yi,gradient_img)
                 xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
                 title(['Gradient Iteration ', num2str(iter)]); 
-                colorbar; colormap('parula');  % 彩色 drawnow;
+                colorbar; colormap(cmap_rb);  % 彩色 drawnow;
             end
         end
         % Remove Ringing from Gradient Image
@@ -330,23 +360,49 @@ for f_idx = 1:numel(fDATA)
         % Visualize Numerical Solution
         subplot(2,3,1); imagesc(xi,yi,VEL_ESTIM,crange);
         title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
-        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap('parula');  % 彩色
+        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
         subplot(2,3,4); imagesc(xi,yi,Np2dB*slow2atten*ATTEN_ESTIM,attenrange);
         title(['Estimated Attenuation ', num2str(iter)]); axis image;
-        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap('parula');  % 彩色
+        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
         subplot(2,3,2); imagesc(xi_orig,yi_orig,C,crange);
         title('True Wave Velocity'); axis image;
-        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap('parula');  % 彩色
+        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
         subplot(2,3,5); imagesc(xi_orig,yi_orig,atten,attenrange);
         title('Attenuation'); axis image;
-        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap('parula');  % 彩色
+        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
         subplot(2,3,3); imagesc(xi,yi,search_dir)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
-        title(['Search Direction Iteration ', num2str(iter)]); colorbar; colormap('parula');  % 彩色 
+        title(['Search Direction Iteration ', num2str(iter)]); colorbar; colormap(cmap_rb);  % 彩色 
         subplot(2,3,6); imagesc(xi,yi,-gradient_img)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
-        title(['Gradient Iteration ', num2str(iter)]); colorbar; colormap('parula');  % 彩色 
+        title(['Gradient Iteration ', num2str(iter)]); colorbar; colormap(cmap_rb);  % 彩色
         drawnow; disp(['Iteration ', num2str(iter)]); toc;
+
+        % GIF 帧保存
+        if saveGIF
+            gif_iter_count = gif_iter_count + 1;
+            if mod(gif_iter_count - 1, gif_save_every) == 0
+                set(hgif_im, 'CData', VEL_ESTIM);
+                if updateAttenuation
+                    pass_tag = 'SoS+Atten';
+                else
+                    pass_tag = 'SoS';
+                end
+                title(axgif, sprintf('iter=%d  f=%.3fMHz  pass=%s', ...
+                    iter, fDATA(f_idx)/1e6, pass_tag), ...
+                    'FontSize', 10, 'Interpreter', 'none');
+                drawnow limitrate nocallbacks;
+                frame = getframe(hgif);
+                im = frame2im(frame);
+                [A, map] = rgb2ind(im, 128);
+                if ~gif_initialized
+                    imwrite(A, map, gif_filepath, 'gif', 'LoopCount', Inf, 'DelayTime', gif_delay);
+                    gif_initialized = true;
+                else
+                    imwrite(A, map, gif_filepath, 'gif', 'WriteMode', 'append', 'DelayTime', gif_delay);
+                end
+            end
+        end
     end
 
     if stopNow
@@ -357,18 +413,93 @@ end
 % Plot Final Reconstructions
 subplot(2,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
 title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
-xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap('parula');  % 彩色
+xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
 subplot(2,2,2); imagesc(xi,yi,Np2dB*slow2atten*ATTEN_ESTIM,attenrange); 
 title(['Estimated Attenuation ', num2str(iter)]); axis image;
-xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap('parula');  % 彩色
+xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
 subplot(2,2,3); imagesc(xi,yi,C,crange);
 title('True Wave Velocity'); axis image;
-xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap('parula');  % 彩色
+xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
 subplot(2,2,4); imagesc(xi,yi,atten,attenrange); 
 title('Attenuation'); axis image;
-xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap('parula');  % 彩色
+xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);  % 彩色
+
+if saveGIF && gif_initialized
+    fprintf('[GIF] 保存完成：%s\n', gif_filepath);
+end
+
+%% Quantitative Metrics (PSNR / RMSE / SSIM / RD)
+targetDevPct = 85;
+bgDevPct     = 40;
+bg_ref_tol   = 5.0;
+
+[X_true, Y_true]   = meshgrid(xi_orig, yi_orig);
+[X_recon, Y_recon] = meshgrid(xi, yi);
+C_true_on_reconGrid = interp2(X_true, Y_true, C, X_recon, Y_recon, 'linear', nan);
+
+valid_mask = isfinite(C_true_on_reconGrid) & isfinite(VEL_ESTIM);
+v_true  = C_true_on_reconGrid(valid_mask);
+v_recon = VEL_ESTIM(valid_mask);
+
+mse_vel = mean((v_recon - v_true).^2);
+peakVel = max(v_true);
+if mse_vel > 0
+    PSNR_dB = 10 * log10((peakVel^2) / mse_vel);
+else
+    PSNR_dB = inf;
+end
+
+L_dyn = max(v_true) - min(v_true);
+if L_dyn <= 0
+    SSIM_val = 1.0;
+else
+    C1_ssim = (0.01 * L_dyn)^2;
+    C2_ssim = (0.03 * L_dyn)^2;
+    mu_t = mean(v_true);
+    mu_r = mean(v_recon);
+    var_t = var(v_true, 1);
+    var_r = var(v_recon, 1);
+    cov_tr = mean((v_true - mu_t) .* (v_recon - mu_r));
+    SSIM_val = ((2*mu_t*mu_r + C1_ssim) * (2*cov_tr + C2_ssim)) / ...
+               ((mu_t^2 + mu_r^2 + C1_ssim) * (var_t + var_r + C2_ssim));
+end
+
+bg_ref = median(C_true_on_reconGrid(valid_mask), 'omitnan');
+dev_true = abs(C_true_on_reconGrid - bg_ref);
+dev_valid = dev_true(valid_mask);
+dev_target_th = prctile(dev_valid, targetDevPct);
+dev_bg_th     = prctile(dev_valid, bgDevPct);
+target_mask = valid_mask & (dev_true >= dev_target_th);
+bg_mask     = valid_mask & (dev_true <= dev_bg_th);
+if nnz(target_mask) < 10
+    target_mask = valid_mask & (abs(C_true_on_reconGrid - bg_ref) > bg_ref_tol);
+end
+if nnz(bg_mask) < 10
+    bg_mask = valid_mask & (abs(C_true_on_reconGrid - bg_ref) <= bg_ref_tol);
+end
+
+RMSE_val = sqrt(mse_vel);
+if nnz(target_mask) > 1 && nnz(bg_mask) > 1
+    target_recon = VEL_ESTIM(target_mask);
+    target_true = C_true_on_reconGrid(target_mask);
+    c_bkgnd_scalar = mean(VEL_ESTIM(bg_mask));
+    numerator_RD = norm(target_recon - target_true);
+    denominator_RD = norm(c_bkgnd_scalar - target_true);
+    RD_percent = numerator_RD / max(denominator_RD, eps) * 100;
+else
+    RD_percent = nan;
+end
+
+fprintf('\n================ 定量指标 (SoS) ================\n');
+fprintf('PSNR : %.4f dB\n', PSNR_dB);
+fprintf('RMSE : %.6f m/s\n', RMSE_val);
+fprintf('SSIM : %.6f\n', SSIM_val);
+fprintf('RD   : %.4f %%\n', RD_percent);
+fprintf('目标像素数: %d, 背景像素数: %d\n', nnz(target_mask), nnz(bg_mask));
+fprintf('===============================================\n\n');
 
 % Save the Result to File
-filename_results = ['D:\Document_ING_fws\WaveformInversionUST\Results\start20260303\', filename, '_V0_WaveformInversionResults.mat'];
+filename_results = [result_dir, filename, '_V0_WaveformInversionResults.mat'];
 save(filename_results, '-v7.3', 'xi', 'yi', 'fDATA', 'niterAttenPerFreq', ...
-    'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', 'SEARCH_DIR_ITER')
+    'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', 'SEARCH_DIR_ITER', ...
+    'PSNR_dB', 'RMSE_val', 'SSIM_val', 'RD_percent')
