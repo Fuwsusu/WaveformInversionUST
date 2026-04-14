@@ -21,8 +21,18 @@ cmap_rb = [
 
 % Load Extracted Dataset
 filename = 'BenignCyst_sparse256'; % 'BenignCyst', 'Malignancy'
-load(['SampleData/', filename, '.mat'], ...
-    'time', 'transducerPositionsXY', 'full_dataset');
+dataPath = ['SampleData/', filename, '.mat'];
+load(dataPath, 'time', 'transducerPositionsXY', 'full_dataset');
+
+% Optional ground truth for curve comparison / quantitative metrics
+hasGroundTruth = false;
+if exist(dataPath, 'file') == 2
+    varsInFile = who('-file', dataPath);
+    if all(ismember({'C', 'xi_orig', 'yi_orig'}, varsInFile))
+        load(dataPath, 'C', 'xi_orig', 'yi_orig');
+        hasGroundTruth = true;
+    end
+end
 
 % Assemble Full Dataset
 numElements = size(transducerPositionsXY,2);
@@ -345,6 +355,121 @@ xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
 subplot(1,2,2); imagesc(xi,yi,Np2dB*slow2atten*ATTEN_ESTIM,attenrange); 
 title(['Estimated Attenuation ', num2str(iter)]); axis image;
 xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
+
+%% Curve comparison (blue=initial, red=final)
+figure(7); clf;
+
+% Axial profile at x=0
+cut_x_m = 0;
+[~, ix_cut] = min(abs(xi - cut_x_m));
+vel_axial_init = VEL_INIT(:, ix_cut);
+vel_axial_final = VEL_ESTIM(:, ix_cut);
+
+% Lateral profile at y=0
+cut_y_m = 0;
+[~, iy_cut] = min(abs(yi - cut_y_m));
+vel_lateral_init = VEL_INIT(iy_cut, :);
+vel_lateral_final = VEL_ESTIM(iy_cut, :);
+
+subplot(1,2,1);
+plot(vel_axial_init, yi, 'b--', 'LineWidth', 1.6, 'DisplayName', 'Initial'); hold on;
+plot(vel_axial_final, yi, 'r-', 'LineWidth', 1.8, 'DisplayName', 'Final');
+if hasGroundTruth
+    [~, ix_gt] = min(abs(xi_orig - cut_x_m));
+    vel_axial_true = C(:, ix_gt);
+    plot(vel_axial_true, yi_orig, 'k-', 'LineWidth', 1.6, 'DisplayName', 'Ground truth');
+end
+set(gca, 'YDir', 'reverse');
+xlabel('Sound Speed [m/s]'); ylabel('Axial [m]');
+title(sprintf('Axial profile at x = %.1f mm', cut_x_m*1e3));
+legend('Location', 'best'); grid on; xlim(crange);
+
+subplot(1,2,2);
+plot(xi, vel_lateral_init, 'b--', 'LineWidth', 1.6, 'DisplayName', 'Initial'); hold on;
+plot(xi, vel_lateral_final, 'r-', 'LineWidth', 1.8, 'DisplayName', 'Final');
+if hasGroundTruth
+    [~, iy_gt] = min(abs(yi_orig - cut_y_m));
+    vel_lateral_true = C(iy_gt, :);
+    plot(xi_orig, vel_lateral_true, 'k-', 'LineWidth', 1.6, 'DisplayName', 'Ground truth');
+end
+xlabel('Lateral [m]'); ylabel('Sound Speed [m/s]');
+title(sprintf('Lateral profile at y = %.1f mm', cut_y_m*1e3));
+legend('Location', 'best'); grid on;
+xlim([xi(1), xi(end)]); ylim(crange);
+
+%% Quantitative metrics
+if hasGroundTruth
+    [X_gt, Y_gt] = meshgrid(xi_orig, yi_orig);
+    [X_est, Y_est] = meshgrid(xi, yi);
+    C_true_on_est = interp2(X_gt, Y_gt, C, X_est, Y_est, 'linear', nan);
+    valid_mask = isfinite(C_true_on_est) & isfinite(VEL_ESTIM);
+    v_true = C_true_on_est(valid_mask);
+    v_est = VEL_ESTIM(valid_mask);
+
+    mse_vel = mean((v_est - v_true).^2);
+    RMSE_val = sqrt(mse_vel);
+    peakVel = max(v_true);
+    if mse_vel > 0
+        PSNR_dB = 10*log10((peakVel^2)/mse_vel);
+    else
+        PSNR_dB = inf;
+    end
+
+    L_dyn = max(v_true) - min(v_true);
+    if L_dyn <= 0
+        SSIM_val = 1.0;
+    else
+        C1_ssim = (0.01*L_dyn)^2;
+        C2_ssim = (0.03*L_dyn)^2;
+        mu_t = mean(v_true); mu_e = mean(v_est);
+        var_t = var(v_true,1); var_e = var(v_est,1);
+        cov_te = mean((v_true-mu_t).*(v_est-mu_e));
+        SSIM_val = ((2*mu_t*mu_e + C1_ssim) * (2*cov_te + C2_ssim)) / ...
+                   ((mu_t^2 + mu_e^2 + C1_ssim) * (var_t + var_e + C2_ssim));
+    end
+
+    bg_ref = median(C_true_on_est(valid_mask), 'omitnan');
+    dev_true = abs(C_true_on_est - bg_ref);
+    dev_valid = dev_true(valid_mask);
+    target_mask = valid_mask & (dev_true >= prctile(dev_valid, 85));
+    bg_mask = valid_mask & (dev_true <= prctile(dev_valid, 40));
+    if nnz(target_mask) < 10
+        target_mask = valid_mask & (abs(C_true_on_est - bg_ref) > 5.0);
+    end
+    if nnz(bg_mask) < 10
+        bg_mask = valid_mask & (abs(C_true_on_est - bg_ref) <= 5.0);
+    end
+    if nnz(target_mask) > 1 && nnz(bg_mask) > 1
+        target_est = VEL_ESTIM(target_mask);
+        target_true = C_true_on_est(target_mask);
+        bg_scalar = mean(VEL_ESTIM(bg_mask));
+        RD_percent = norm(target_est - target_true) / ...
+            max(norm(bg_scalar - target_true), eps) * 100;
+    else
+        RD_percent = nan;
+    end
+
+    fprintf('\n================ Quantitative Metrics (with GT) ================\n');
+    fprintf('PSNR : %.4f dB\n', PSNR_dB);
+    fprintf('RMSE : %.6f m/s\n', RMSE_val);
+    fprintf('SSIM : %.6f\n', SSIM_val);
+    fprintf('RD   : %.4f %%\n', RD_percent);
+    fprintf('===============================================================\n\n');
+else
+    deltaV = VEL_ESTIM - VEL_INIT;
+    RMSE_init = sqrt(mean(deltaV(:).^2));
+    MAE_init = mean(abs(deltaV(:)));
+    NRMSE_init_pct = RMSE_init / max(mean(VEL_INIT(:)), eps) * 100;
+    [gx, gy] = gradient(VEL_ESTIM, h, h);
+    TV_norm = mean(sqrt(gx.^2 + gy.^2), 'all');
+
+    fprintf('\n=========== Quantitative Metrics (no GT, relative) ===========\n');
+    fprintf('RMSE(final, init) : %.6f m/s\n', RMSE_init);
+    fprintf('MAE(final, init)  : %.6f m/s\n', MAE_init);
+    fprintf('NRMSE(final, init): %.4f %%\n', NRMSE_init_pct);
+    fprintf('TV-norm(final)    : %.6f\n', TV_norm);
+    fprintf('==============================================================\n\n');
+end
 
 if saveGIF && gif_initialized
     fprintf('[GIF] saved: %s\n', gif_filepath);
