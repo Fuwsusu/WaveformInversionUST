@@ -192,7 +192,7 @@ if saveGIF
         mkdir(result_dir);
     end
     fprintf('[GIF] will save to: %s\n', gif_filepath);
-    hgif = figure(99);
+    hgif = figure(99); % GIF only tracks iterative wave-velocity figure
     set(hgif, 'Visible', 'on', 'Position', [100 100 640 560]);
     axgif = axes('Parent', hgif);
     hgif_im = imagesc(axgif, xi, yi, VEL_ESTIM, crange);
@@ -344,9 +344,27 @@ for f_idx = 1:numel(fDATA)
         if saveGIF
             gif_iter_count = gif_iter_count + 1;
             if mod(gif_iter_count - 1, gif_save_every) == 0
-                title(axgif, sprintf('Estimated Wave Velocity | iter=%d | f=%.3f MHz | %s', ...
-                    iter, fDATA(f_idx)/1e6, ternary(updateAttenuation, 'SoS+Atten', 'SoS')));
-                set(hgif_im, 'CData', VEL_ESTIM);
+                if ~exist('hgif', 'var') || ~isgraphics(hgif)
+                    hgif = figure(99);
+                    set(hgif, 'Visible', 'on', 'Position', [100 100 640 560]);
+                end
+                if ~exist('axgif', 'var') || ~isgraphics(axgif) || ...
+                        ~exist('hgif_im', 'var') || ~isgraphics(hgif_im)
+                    clf(hgif);
+                    axgif = axes('Parent', hgif);
+                    hgif_im = imagesc(axgif, xi, yi, VEL_ESTIM, crange);
+                    axis(axgif, 'image');
+                    colorbar(axgif);
+                    colormap(axgif, cmap_rb);
+                    xlabel(axgif, 'Lateral [m]');
+                    ylabel(axgif, 'Axial [m]');
+                else
+                    set(hgif_im, 'CData', VEL_ESTIM);
+                end
+                set(get(axgif, 'Title'), 'String', ...
+                    sprintf('Estimated Wave Velocity | iter=%d | f=%.3f MHz | %s', ...
+                    iter, fDATA(f_idx)/1e6, ternary(updateAttenuation, 'SoS+Atten', 'SoS')), ...
+                    'Interpreter', 'none');
                 drawnow limitrate nocallbacks;
                 frame = getframe(hgif);
                 [A, map] = rgb2ind(frame2im(frame), 128);
