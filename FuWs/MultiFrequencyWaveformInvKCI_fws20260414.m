@@ -200,6 +200,7 @@ if saveGIF
     xlabel(axgif, 'Lateral [m]');
     ylabel(axgif, 'Axial [m]');
 end
+hmain = figure(1); % Main 2x2 iterative display (same as original workflow)
 for f_idx = 1:numel(fDATA)
     % Iterations at Each Frequency
     for iter_f_idx = 1:(niterSoSPerFreq(f_idx)+niterAttenPerFreq(f_idx))
@@ -320,6 +321,7 @@ for f_idx = 1:numel(fDATA)
         GRAD_IMG_ITER(:,:,iter) = gradient_img;
         SEARCH_DIR_ITER(:,:,iter) = search_dir;
         % Visualize Numerical Solution
+        figure(hmain);
         subplot(2,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
         title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
         xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
@@ -376,6 +378,7 @@ for f_idx = 1:numel(fDATA)
 end
 
 % Plot Final Reconstructions
+figure(hmain);
 subplot(1,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
 title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
 xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
