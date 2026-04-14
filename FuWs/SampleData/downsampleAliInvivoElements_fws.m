@@ -21,7 +21,7 @@ function [outputStruct, keepIdx] = downsampleAliInvivoElements_fws(inputFile, ou
 %      - full_dataset: [Nt x Nrx x Ntx]
 %      - transducerPositionsXY: [2 x N]
 %      - time: [Nt x 1] or [1 x Nt]
-%   2) Uses callable helper: FuWs/makeSparseRingArrayData.m
+%   2) Uses callable helper: FuWs/SampleData/makeSparseRingArrayData_fws.m
 
     arguments
         inputFile (1,:) char
@@ -41,12 +41,12 @@ function [outputStruct, keepIdx] = downsampleAliInvivoElements_fws(inputFile, ou
     originalNumElements = size(in.transducerPositionsXY, 2);
 
 
-    if exist('makeSparseRingArrayData', 'file') ~= 2
+    if exist('makeSparseRingArrayData_fws', 'file') ~= 2
         thisDir = fileparts(mfilename('fullpath'));
         addpath(thisDir);
     end
 
-    [in.full_dataset, in.transducerPositionsXY, keepIdx] = makeSparseRingArrayData(...
+    [in.full_dataset, in.transducerPositionsXY, keepIdx] = makeSparseRingArrayData_fws(...
         in.full_dataset, in.transducerPositionsXY, targetNumElements);
 
     in.sparseArray.originalNumElements = originalNumElements;
