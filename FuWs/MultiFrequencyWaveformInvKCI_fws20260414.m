@@ -1,8 +1,23 @@
 clear
 clc
+scriptTimer = tic; % Total script runtime (s)
 
 % Add Functions to Path
 addpath(genpath('Functions'));
+
+% ------------------ Iteration/GIF/Display Controls ------------------
+runAllIterations = false; % true=run all iterations, false=stop at requestedIterations
+requestedIterations = 60; % Only effective when runAllIterations=false
+saveGIF = true;           % Save per-iteration velocity animation GIF
+gif_delay = 0.20;         % Delay time [s]
+gif_save_every = 1;       % Save every N-th iteration
+% Soft red-blue colormap (blue=low, red=high)
+n_cmap = 256; n2 = n_cmap/2;
+cmap_rb = [
+    linspace(0.17, 1.00, n2)', linspace(0.51, 1.00, n2)', linspace(0.83, 1.00, n2)';
+    linspace(1.00, 0.84, n2)', linspace(1.00, 0.18, n2)', linspace(1.00, 0.15, n2)'
+];
+% --------------------------------------------------------------------
 
 % Load Extracted Dataset
 filename = 'BenignCyst_sparse256'; % 'BenignCyst', 'Malignancy'
@@ -148,17 +163,35 @@ attenrange = 10*[-1,1]; % For reconstruction display [dB/(cm MHz)]
 c0 = mean(VEL_ESTIM(:)); cutoff = 0.75; ord = Inf; % Parameters for Ringing Removal Filter
 % Values to Save at Each Iteration
 Niter = sum(niterSoSPerFreq)+sum(niterAttenPerFreq);
+if requestedIterations >= Niter
+    runAllIterations = true;
+end
 VEL_ESTIM_ITER = zeros(Nyi,Nxi,Niter);
 ATTEN_ESTIM_ITER = zeros(Nyi, Nxi, Niter);
 GRAD_IMG_ITER = zeros(Nyi,Nxi,Niter);
 SEARCH_DIR_ITER = zeros(Nyi,Nxi,Niter);
+ITER_TIME_SEC = nan(1, Niter);
+
+% GIF output config
+result_dir = 'D:\文件ing\WaveformInversionUST\Results\';
+gif_filepath = [result_dir, filename, '_WaveformInversionVEL_anim.gif'];
+gif_initialized = false;
+gif_iter_count = 0;
+if saveGIF
+    fprintf('[GIF] will save to: %s\n', gif_filepath);
+end
+mainLoopTimer = tic; % Main inversion loop runtime
 for f_idx = 1:numel(fDATA)
     % Iterations at Each Frequency
     for iter_f_idx = 1:(niterSoSPerFreq(f_idx)+niterAttenPerFreq(f_idx))
-        tic;
-        % Step 1: Accumulate Backprojection Over Each Element
         iter = iter_f_idx + sum(niterSoSPerFreq(1:f_idx-1)) + ...
             sum(niterAttenPerFreq(1:f_idx-1));
+        if ~runAllIterations && (iter > requestedIterations)
+            fprintf('[STOP] reached requestedIterations=%d, stop inversion loop.\n', requestedIterations);
+            break;
+        end
+        tic;
+        % Step 1: Accumulate Backprojection Over Each Element
         % Reset CG at Each Frequency (SoS and Attenuation)
         if ((iter_f_idx == 1) || (iter_f_idx == 1+niterSoSPerFreq(f_idx)))
             search_dir = zeros(Nyi, Nxi); % Conjugate Gradient Direction
@@ -270,29 +303,58 @@ for f_idx = 1:numel(fDATA)
         % Visualize Numerical Solution
         subplot(2,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
         title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
-        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
+        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
         subplot(2,2,2); imagesc(xi,yi,Np2dB*slow2atten*ATTEN_ESTIM,attenrange);
         title(['Estimated Attenuation ', num2str(iter)]); axis image;
-        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
+        xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
         subplot(2,2,3); imagesc(xi,yi,search_dir)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
-        title(['Search Direction Iteration ', num2str(iter)]); colorbar; colormap gray; 
+        title(['Search Direction Iteration ', num2str(iter)]); colorbar; colormap(cmap_rb); 
         subplot(2,2,4); imagesc(xi,yi,-gradient_img)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
-        title(['Gradient Iteration ', num2str(iter)]); colorbar; colormap gray; 
-        drawnow; disp(['Iteration ', num2str(iter)]); toc;
+        title(['Gradient Iteration ', num2str(iter)]); colorbar; colormap(cmap_rb); 
+        drawnow;
+        iter_elapsed = toc;
+        ITER_TIME_SEC(iter) = iter_elapsed;
+        disp(['Iteration ', num2str(iter), ...
+            ' | Time ', num2str(iter_elapsed, '%.3f'), ' s']);
+
+        if saveGIF
+            gif_iter_count = gif_iter_count + 1;
+            if mod(gif_iter_count - 1, gif_save_every) == 0
+                frame = getframe(gcf);
+                [A, map] = rgb2ind(frame2im(frame), 256);
+                if ~gif_initialized
+                    imwrite(A, map, gif_filepath, 'gif', 'LoopCount', Inf, 'DelayTime', gif_delay);
+                    gif_initialized = true;
+                else
+                    imwrite(A, map, gif_filepath, 'gif', 'WriteMode', 'append', 'DelayTime', gif_delay);
+                end
+            end
+        end
+    end
+    if ~runAllIterations && (iter >= requestedIterations)
+        break;
     end
 end
 
 % Plot Final Reconstructions
 subplot(1,2,1); imagesc(xi,yi,VEL_ESTIM,crange);
 title(['Estimated Wave Velocity ', num2str(iter)]); axis image;
-xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
+xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
 subplot(1,2,2); imagesc(xi,yi,Np2dB*slow2atten*ATTEN_ESTIM,attenrange); 
 title(['Estimated Attenuation ', num2str(iter)]); axis image;
-xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap gray;
+xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
+
+if saveGIF && gif_initialized
+    fprintf('[GIF] saved: %s\n', gif_filepath);
+end
+mainLoopElapsedSec = toc(mainLoopTimer);
+scriptElapsedSec = toc(scriptTimer);
+fprintf('[TIME] main loop: %.3f s | total script: %.3f s\n', mainLoopElapsedSec, scriptElapsedSec);
 
 % Save the Result to File
 filename_results = ['D:\文件ing\WaveformInversionUST\Results\', filename, '_WaveformInversionResults.mat'];
 save(filename_results, '-v7.3', 'xi', 'yi', 'fDATA', 'niterAttenPerFreq', ...
-    'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', 'SEARCH_DIR_ITER')
+    'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', ...
+    'SEARCH_DIR_ITER', 'ITER_TIME_SEC')
