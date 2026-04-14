@@ -1,7 +1,6 @@
 clear
 clc
 scriptTimer = tic; % Total script runtime (s)
-
 % Add Functions to Path
 addpath(genpath('Functions'));
 
@@ -180,7 +179,6 @@ VEL_ESTIM_ITER = zeros(Nyi,Nxi,Niter);
 ATTEN_ESTIM_ITER = zeros(Nyi, Nxi, Niter);
 GRAD_IMG_ITER = zeros(Nyi,Nxi,Niter);
 SEARCH_DIR_ITER = zeros(Nyi,Nxi,Niter);
-ITER_TIME_SEC = nan(1, Niter);
 
 % GIF output config
 result_dir = 'D:\Document_ING_fws\WaveformInversionUST\Results\start20260303\';
@@ -202,7 +200,6 @@ if saveGIF
     xlabel(axgif, 'Lateral [m]');
     ylabel(axgif, 'Axial [m]');
 end
-mainLoopTimer = tic; % Main inversion loop runtime
 for f_idx = 1:numel(fDATA)
     % Iterations at Each Frequency
     for iter_f_idx = 1:(niterSoSPerFreq(f_idx)+niterAttenPerFreq(f_idx))
@@ -335,11 +332,7 @@ for f_idx = 1:numel(fDATA)
         subplot(2,2,4); imagesc(xi,yi,-gradient_img)
         xlabel('Lateral [m]'); ylabel('Axial [m]'); axis image;
         title(['Gradient Iteration ', num2str(iter)]); colorbar; colormap(cmap_rb); 
-        drawnow;
-        iter_elapsed = toc;
-        ITER_TIME_SEC(iter) = iter_elapsed;
-        disp(['Iteration ', num2str(iter), ...
-            ' | Time ', num2str(iter_elapsed, '%.3f'), ' s']);
+        drawnow; disp(['Iteration ', num2str(iter)]); toc;
 
         if saveGIF
             gif_iter_count = gif_iter_count + 1;
@@ -523,15 +516,14 @@ if saveGIF && gif_initialized
         end
     end
 end
-mainLoopElapsedSec = toc(mainLoopTimer);
 scriptElapsedSec = toc(scriptTimer);
-fprintf('[TIME] main loop: %.3f s | total script: %.3f s\n', mainLoopElapsedSec, scriptElapsedSec);
+fprintf('[TIME] total script: %.3f s\n', scriptElapsedSec);
 
 % Save the Result to File
 filename_results = ['D:\Document_ING_fws\WaveformInversionUST\Results\start20260303\', filename, '_WaveformInversionResults.mat'];
 save(filename_results, '-v7.3', 'xi', 'yi', 'fDATA', 'niterAttenPerFreq', ...
     'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', ...
-    'SEARCH_DIR_ITER', 'ITER_TIME_SEC')
+    'SEARCH_DIR_ITER')
 
 function out = ternary(cond, valTrue, valFalse)
 if cond
