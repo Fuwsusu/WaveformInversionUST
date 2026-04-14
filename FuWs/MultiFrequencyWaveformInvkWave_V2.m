@@ -12,12 +12,13 @@ cmap_rb = [
 ];
 
 % GIF 保存设置
-saveGIF        = true;
-gif_delay      = 0.20;
-gif_save_every = 1;
+% saveGIF=true 时，每次迭代后截取 figure(99) 帧并追加到 GIF
+saveGIF        = true;   % true=保存迭代 GIF；false=跳过
+gif_delay      = 0.20;    % 每帧停留时间 [s]（建议 0.15~0.5）
+gif_save_every = 1;       % 每隔多少次迭代保存一帧（1=每次，2=隔一次，减少文件大小）
 
 % Load Extracted Dataset
-filename = 'kWave_CirclePhantom4_256'; % 'kWave_BreastCT', 'kWave_BreastMRI'
+filename = 'kWave_BreastCT_half'; % 'kWave_BreastCT', 'kWave_BreastMRI'
 load(['D:\Document_ING_fws\WaveformInversionUST\Simulations\datasets\', filename, '.mat'], ...
     'xi_orig', 'yi_orig', 'C', 'atten', ...
     'time', 'transducerPositionsXY', 'full_dataset');
@@ -211,7 +212,7 @@ result_dir = 'D:\Document_ING_fws\WaveformInversionUST\Results\start20260303\';
 if ~exist(result_dir,'dir'), mkdir(result_dir); end
 
 if saveGIF
-    gif_filepath = [result_dir, filename, '_V2_VEL_anim.gif'];
+    gif_filepath = [result_dir, filename, '_V0_VEL_anim.gif'];
     fprintf('[GIF] 将保存至: %s\n', gif_filepath);
     gif_initialized = false;
     gif_iter_count  = 0;
