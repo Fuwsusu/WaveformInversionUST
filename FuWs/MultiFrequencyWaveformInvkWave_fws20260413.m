@@ -44,10 +44,11 @@ verTag                = 'V3_5';        % 保存版本号
 % ----------------------------------------------------------------------
 
 % ------------------ fws: 邻频高斯平滑衔接（f_k -> f_{k+1}） ------------------
-% 目的：每个频率完成后，对当前速度图做一次高斯低通，作为“下一个相邻频率”的初值。
+% 目的：仅在三阶段边界（阶段1→2、阶段2→3）做一次高斯低通，
+%       作为下一阶段起始频率的初值，避免每个频率都平滑导致累积过平滑。
 % 注意：仅在频率切换点生效；不在单频迭代内平滑梯度。
 enableInterFreqGaussian = true;         % true=在相邻频率之间做高斯平滑衔接
-gaussSigmaScale        = 0.3;           % sigma倍率（建议0.3~0.5，抑制跨频扩散伪影）
+gaussSigmaScale        = 0.15;          % sigma倍率（阶段边界平滑建议0.10~0.20）
 saveInterFreqInitMat   = true;          % true=导出每次邻频衔接模型到mat文件
 % ----------------------------------------------------------------------
 
@@ -1558,8 +1559,12 @@ for f_idx = 1:numel(fDATA)
         toc;
     end
 
-    % 邻频高斯平滑衔接：f_k 完成后，生成 f_{k+1} 的初值
-    if enableInterFreqGaussian && (f_idx < numel(fDATA))
+    % 邻频高斯平滑衔接：仅在三阶段边界触发（阶段1->2、阶段2->3）
+    is_stage_boundary = enableInterFreqGaussian && (f_idx < numel(fDATA)) && ...
+        ((fDATA(f_idx) <= f_stage1_cutoff && fDATA(f_idx + 1) > f_stage1_cutoff) || ...
+         (fDATA(f_idx) <= f_stage2_cutoff && fDATA(f_idx + 1) > f_stage2_cutoff));
+
+    if is_stage_boundary
         f_cur = fDATA(f_idx);
         f_next = fDATA(f_idx + 1);
         lambda_cur = c_init / f_cur;
