@@ -183,7 +183,7 @@ SEARCH_DIR_ITER = zeros(Nyi,Nxi,Niter);
 ITER_TIME_SEC = nan(1, Niter);
 
 % GIF output config
-result_dir = 'D:\Document_ING_fws\WaveformInversionUST\Results\start20260414\';
+result_dir = 'D:\Document_ING_fws\WaveformInversionUST\Results\start20260303\';
 gif_filepath = [result_dir, filename, '_WaveformInversionVEL_anim.gif'];
 gif_initialized = false;
 gif_iter_count = 0;
@@ -479,7 +479,7 @@ scriptElapsedSec = toc(scriptTimer);
 fprintf('[TIME] main loop: %.3f s | total script: %.3f s\n', mainLoopElapsedSec, scriptElapsedSec);
 
 % Save the Result to File
-filename_results = ['D:\Document_ING_fws\WaveformInversionUST\Results\start20260414\', filename, '_WaveformInversionResults.mat'];
+filename_results = ['D:\Document_ING_fws\WaveformInversionUST\Results\start20260303\', filename, '_WaveformInversionResults.mat'];
 save(filename_results, '-v7.3', 'xi', 'yi', 'fDATA', 'niterAttenPerFreq', ...
     'niterSoSPerFreq', 'VEL_ESTIM_ITER', 'ATTEN_ESTIM_ITER', 'GRAD_IMG_ITER', ...
     'SEARCH_DIR_ITER', 'ITER_TIME_SEC')
