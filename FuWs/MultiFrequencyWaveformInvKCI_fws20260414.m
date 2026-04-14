@@ -498,7 +498,11 @@ if saveGIF && gif_initialized
             implay(gif_filepath);
         end
     catch ME
-        warning('[GIF] preview failed: %s', ME.message);
+        if isempty(ME.identifier)
+            warning('GIF:PreviewFailed', '%s', ME.message);
+        else
+            warning(ME.identifier, '%s', ME.message);
+        end
     end
 end
 mainLoopElapsedSec = toc(mainLoopTimer);
