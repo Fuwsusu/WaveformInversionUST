@@ -60,9 +60,20 @@ fsa_rf_data = single(full_dataset);
 clearvars full_dataset;
 
 % Extract the Desired Frequency for Waveform Inversion
-fDATA_SoS = (0.3:0.05:1.25)*(1e6); % Frequencies for SoS-only Iterations [Hz]
-fDATA_SoSAtten = (0.325:0.05:1.275)*(1e6); % Frequencies for SoS/Attenuation Iterations [Hz]
-fDATA = [fDATA_SoS, fDATA_SoSAtten]; % All Frequencies [Hz]
+% fDATA_SoS = (0.3:0.05:1.25)*(1e6); % Frequencies for SoS-only Iterations [Hz]
+% fDATA_SoSAtten = (0.325:0.05:1.275)*(1e6); % Frequencies for SoS/Attenuation Iterations [Hz]
+% fDATA = [fDATA_SoS, fDATA_SoSAtten]; % All Frequencies [Hz]
+
+% fws-Modified: segmented step-size frequency schedule (same overall range)
+% Low: 0.30–0.45 MHz (25 kHz)
+% Mid: 0.50–0.70 MHz (50 kHz)
+% High: 0.775–1.250 MHz (75 kHz + forced 1.250 MHz endpoint)
+fDATA_SoS = [ (0.30:0.025:0.45), (0.50:0.05:0.70), (0.775:0.075:1.225), 1.250 ] * 1e6;
+fDATA_SoSAtten = fDATA_SoS + 25e3; % same +25 kHz shift as original
+fDATA = [fDATA_SoS, fDATA_SoSAtten]; % all frequencies [Hz]
+
+fprintf('[CHECK] numel(fDATA_SoS)=%d | SoS total iter=%d | Niter estimate=%d\n', ...
+    numel(fDATA_SoS), numel(fDATA_SoS)*3, numel(fDATA_SoS)*3 + numel(fDATA_SoSAtten)*6);
 
 % Attenuation Iterations Always Happen After SoS Iterations
 niterSoSPerFreq = [3*ones(size(fDATA_SoS)), 3*ones(size(fDATA_SoSAtten))]; % Number of Sound Speed Iterations Per Frequency
