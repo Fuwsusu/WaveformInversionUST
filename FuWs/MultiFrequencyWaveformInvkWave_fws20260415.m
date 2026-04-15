@@ -124,10 +124,6 @@ f_stage1_cutoff  = 0.475e6;  % 阶段1/2分界 [Hz]（≈Low段末，与 frac_sh
 f_stage2_cutoff  = 0.850e6;  % 阶段2/3分界 [Hz]（≈Mid段末，对应 fDATA_SoS 第二组末尾）
 % -----------------------------------------------------------------------
 
-
-
-
-
 % ------------------ GIF 保存 ------------------
 % saveGIF=true 时，每次迭代后截取 figure(99) 帧并追加到 GIF
 % 用于观察环状伪影从何频率段开始出现、VE 如何影响其演化
@@ -696,7 +692,7 @@ SEARCH_DIR_ITER  = zeros(Nyi, Nxi, Niter);
 PHI_ITER         = nan(1, Niter);
 
 %% ---------- 用户控制：迭代执行选项 ----------
-runAllIterations    = false;
+runAllIterations    = true;
 requestedIterations = 60;
 if requestedIterations >= Niter, runAllIterations = true; end
 savedIters   = [];
