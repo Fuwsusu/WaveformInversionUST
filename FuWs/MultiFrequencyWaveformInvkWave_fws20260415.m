@@ -909,6 +909,7 @@ for f_idx = 1:numel(fDATA)
 
             ADJ_SRC(:,:,elmt_idx) = ADJ_SRC_elmt;
         end
+        phi_k = phi_k_accum;
 
         % Backproject error
         ADJ_WVFIELD = HS.solve(ADJ_SRC, true);
