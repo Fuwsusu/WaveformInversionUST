@@ -404,6 +404,7 @@ xlabel('Lateral [m]'); ylabel('Axial [m]'); colorbar; colormap(cmap_rb);
 
 %% Curve comparison (blue=initial, red=final)
 figure(7); clf;
+set(gcf, 'Position', [80 120 1680 700]);
 
 % Axial profile at x=0
 cut_x_m = 0;
@@ -417,7 +418,23 @@ cut_y_m = 0;
 vel_lateral_init = VEL_INIT(iy_cut, :);
 vel_lateral_final = VEL_ESTIM(iy_cut, :);
 
-subplot(1,2,1);
+% Schematic: where the two profiles are extracted
+subplot(1,3,1);
+imagesc(xi, yi, VEL_ESTIM, crange); axis image;
+set(gca, 'YDir', 'reverse');
+colormap(cmap_rb); colorbar;
+hold on;
+plot([cut_x_m, cut_x_m], [yi(1), yi(end)], 'w--', 'LineWidth', 2.0, ...
+    'DisplayName', sprintf('Axial cut x = %.1f mm', cut_x_m*1e3));
+plot([xi(1), xi(end)], [cut_y_m, cut_y_m], 'c--', 'LineWidth', 2.0, ...
+    'DisplayName', sprintf('Lateral cut y = %.1f mm', cut_y_m*1e3));
+plot(cut_x_m, cut_y_m, 'yo', 'MarkerFaceColor', 'y', 'MarkerSize', 7, ...
+    'DisplayName', 'Intersection');
+xlabel('Lateral [m]'); ylabel('Axial [m]');
+title('Profile extraction schematic');
+legend('Location', 'southoutside'); grid on;
+
+subplot(1,3,2);
 plot(vel_axial_init, yi, 'b--', 'LineWidth', 1.6, 'DisplayName', 'Initial'); hold on;
 plot(vel_axial_final, yi, 'r-', 'LineWidth', 1.8, 'DisplayName', 'Final');
 if hasGroundTruth
@@ -430,7 +447,7 @@ xlabel('Sound Speed [m/s]'); ylabel('Axial [m]');
 title(sprintf('Axial profile at x = %.1f mm', cut_x_m*1e3));
 legend('Location', 'best'); grid on; xlim(crange);
 
-subplot(1,2,2);
+subplot(1,3,3);
 plot(xi, vel_lateral_init, 'b--', 'LineWidth', 1.6, 'DisplayName', 'Initial'); hold on;
 plot(xi, vel_lateral_final, 'r-', 'LineWidth', 1.8, 'DisplayName', 'Final');
 if hasGroundTruth
