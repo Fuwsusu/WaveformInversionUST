@@ -424,12 +424,13 @@ imagesc(xi, yi, VEL_ESTIM, crange); axis image;
 set(gca, 'YDir', 'reverse');
 colormap(cmap_rb); colorbar;
 hold on;
-plot([cut_x_m, cut_x_m], [yi(1), yi(end)], 'w--', 'LineWidth', 2.0, ...
+plot([cut_x_m, cut_x_m], [yi(1), yi(end)], 'b--', 'LineWidth', 2.0, ...
     'DisplayName', sprintf('Axial cut x = %.1f mm', cut_x_m*1e3));
-plot([xi(1), xi(end)], [cut_y_m, cut_y_m], 'c--', 'LineWidth', 2.0, ...
+plot([xi(1), xi(end)], [cut_y_m, cut_y_m], 'r--', 'LineWidth', 2.0, ...
     'DisplayName', sprintf('Lateral cut y = %.1f mm', cut_y_m*1e3));
+% Intersection is only a reference point showing where the two profile cuts meet
 plot(cut_x_m, cut_y_m, 'yo', 'MarkerFaceColor', 'y', 'MarkerSize', 7, ...
-    'DisplayName', 'Intersection');
+    'DisplayName', 'Cut intersection (reference)');
 xlabel('Lateral [m]'); ylabel('Axial [m]');
 title('Profile extraction schematic');
 legend('Location', 'southoutside'); grid on;
