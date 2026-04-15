@@ -87,6 +87,9 @@ clearvars full_dataset;
 fDATA_SoS = (0.3:0.05:1.25)*(1e6); % Frequencies for SoS-only Iterations [Hz]
 fDATA_SoSAtten = (0.325:0.05:1.275)*(1e6); % Frequencies for SoS/Attenuation Iterations [Hz]
 fDATA = [fDATA_SoS, fDATA_SoSAtten]; % All Frequencies [Hz]
+% fDATA_SoS = [ (0.30:0.025:0.45), (0.50:0.05:0.70), (0.775:0.075:1.225), 1.250 ] * 1e6;
+% fDATA_SoSAtten = fDATA_SoS + 25e3;  % same +25 kHz shift as original
+% fDATA = [fDATA_SoS, fDATA_SoSAtten]; % all frequencies [Hz]
 
 % Attenuation Iterations Always Happen After SoS Iterations
 niterSoSPerFreq = [3*ones(size(fDATA_SoS)), 3*ones(size(fDATA_SoSAtten))]; % Number of Sound Speed Iterations Per Frequency
