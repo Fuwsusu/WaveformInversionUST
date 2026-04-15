@@ -407,13 +407,13 @@ figure(7); clf;
 set(gcf, 'Position', [80 120 1680 700]);
 
 % Axial profile at x=0
-cut_x_m = 0.03;
+cut_x_m = 0.025;
 [~, ix_cut] = min(abs(xi - cut_x_m));
 vel_axial_init = VEL_INIT(:, ix_cut);
 vel_axial_final = VEL_ESTIM(:, ix_cut);
 
 % Lateral profile at y=0
-cut_y_m = 0.03;
+cut_y_m = 0.025;
 [~, iy_cut] = min(abs(yi - cut_y_m));
 vel_lateral_init = VEL_INIT(iy_cut, :);
 vel_lateral_final = VEL_ESTIM(iy_cut, :);
