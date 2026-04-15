@@ -19,8 +19,7 @@
 %               阶段3（高频，> f_stage2_cutoff）：约束拉向阶段2末尾参考模型
 %             各阶段内 lambda_k = lambda_stage·(f_stageN_cutoff/f)²，频率越高约束越弱。
 %             相对归一化消除量纲不匹配（见主循环内注释）。
-%             抑制128稀疏阵梯度相干增强产生的同心环状伪影，保留真实声速边界。
-%   13. 其余算法逻辑（Helmholtz、CG）与原版一致
+%   10. 其余算法逻辑（Helmholtz、CG）与原版一致
 % ===========================================================================================
 clear; clc;
 scriptTimer = tic;   % 整个脚本总时长（含预计算、主反演、保存）
@@ -766,7 +765,7 @@ COS_GRAD_ITER         = nan(1, Niter);
 ALPHA_GATE_XF_ITER    = ones(1, Niter);
 
 %% ---------- 用户控制：迭代执行选项 ----------
-runAllIterations    = false;
+runAllIterations    = true;
 requestedIterations = 60;
 if requestedIterations >= Niter, runAllIterations = true; end
 savedIters   = [];
