@@ -428,9 +428,6 @@ plot([cut_x_m, cut_x_m], [yi(1), yi(end)], 'b--', 'LineWidth', 2.0, ...
     'DisplayName', sprintf('Axial cut x = %.1f mm', cut_x_m*1e3));
 plot([xi(1), xi(end)], [cut_y_m, cut_y_m], 'r--', 'LineWidth', 2.0, ...
     'DisplayName', sprintf('Lateral cut y = %.1f mm', cut_y_m*1e3));
-% Intersection is only a reference point showing where the two profile cuts meet
-plot(cut_x_m, cut_y_m, 'yo', 'MarkerFaceColor', 'y', 'MarkerSize', 7, ...
-    'DisplayName', 'Cut intersection (reference)');
 xlabel('Lateral [m]'); ylabel('Axial [m]');
 title('Profile extraction schematic');
 legend('Location', 'southoutside'); grid on;
@@ -444,9 +441,23 @@ if hasGroundTruth
     plot(vel_axial_true, yi_orig, 'k-', 'LineWidth', 1.6, 'DisplayName', 'Ground truth');
 end
 set(gca, 'YDir', 'reverse');
-xlabel('Sound Speed [m/s]'); ylabel('Axial [m]');
+ylabel('Axial [m]'); xlabel('Sound Speed [m/s]');
 title(sprintf('Axial profile at x = %.1f mm', cut_x_m*1e3));
-legend('Location', 'best'); grid on; xlim(crange);
+legend('Location', 'best'); grid on;
+% Use data-driven x-limits so the profile spans the full axis width.
+axial_all = [vel_axial_init(:); vel_axial_final(:)];
+if hasGroundTruth
+    axial_all = [axial_all; vel_axial_true(:)];
+end
+axial_x_min = min(axial_all);
+axial_x_max = max(axial_all);
+if axial_x_max > axial_x_min
+    pad = 0.03*(axial_x_max - axial_x_min);
+    xlim([axial_x_min - pad, axial_x_max + pad]);
+else
+    xlim([axial_x_min-1, axial_x_max+1]);
+end
+ylim([yi(1), yi(end)]);
 
 subplot(1,3,3);
 plot(xi, vel_lateral_init, 'b--', 'LineWidth', 1.6, 'DisplayName', 'Initial'); hold on;
