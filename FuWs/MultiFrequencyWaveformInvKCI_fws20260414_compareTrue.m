@@ -1656,8 +1656,6 @@ figure(6); clf;
 cut_y_m = 0.01;          % 水平切线的 y 坐标 [m]，默认取 y = 0 中心线
 showStageRefs = true; % 若存在阶段参考模型，则一并画出 profile
 lineColor = [1 1 0];  % 切线颜色（黄色）
-showSelectionSchematic = true;   % 是否显示“轮廓线选取位置”示意（高亮带+标注）
-selectionBandHalfWidth = 1.5e-3; % 示意带半宽 [m]，仅用于可视化，不参与计算
 % -------------------------------------------------
 
 % ---- 在粗网格/真值网格上分别找最接近 cut_y_m 的行 ----
@@ -1684,25 +1682,8 @@ subplot(1,2,1);
 imagesc(xi_original, yi_original, VEL_ESTIM, crange);
 axis image; colorbar; colormap(cmap_rb);
 hold on;
-if showSelectionSchematic
-    y0 = yi_original(iy_coarse);
-    y1 = max(yi_original(1), y0 - selectionBandHalfWidth);
-    y2 = min(yi_original(end), y0 + selectionBandHalfWidth);
-    patch([xi_original(1), xi_original(end), xi_original(end), xi_original(1)], ...
-          [y1, y1, y2, y2], ...
-          [1.0, 0.95, 0.1], ...
-          'FaceAlpha', 0.18, 'EdgeColor', 'none', 'DisplayName', 'Profile selection band');
-end
 plot([xi_original(1), xi_original(end)], [yi_original(iy_coarse), yi_original(iy_coarse)], ...
     '-', 'Color', lineColor, 'LineWidth', 1.5);
-if showSelectionSchematic
-    plot(xi_original(round(numel(xi_original)*0.85)), yi_original(iy_coarse), ...
-        'ko', 'MarkerFaceColor', [1 1 0], 'MarkerSize', 6);
-    text(xi_original(round(numel(xi_original)*0.55)), yi_original(iy_coarse) - 0.005, ...
-        sprintf('Selected contour line (y = %.1f mm)', yi_original(iy_coarse)*1e3), ...
-        'Color', [0.15 0.15 0.15], 'FontSize', 10, 'FontWeight', 'bold', ...
-        'BackgroundColor', [1 1 1], 'Margin', 4, 'HorizontalAlignment', 'left');
-end
 hold off;
 xlabel('Lateral [m]');
 ylabel('Axial [m]');
