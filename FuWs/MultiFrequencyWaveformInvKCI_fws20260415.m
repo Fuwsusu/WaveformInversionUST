@@ -49,6 +49,20 @@ VE_freqMode           = 'always';      % 'always' | 'threshold' | 'manual'
 VE_freqThresh         = NaN;           % valid only when VE_freqMode='threshold'
 beta_ve               = 0.50;          % virtual-Rx confidence weight (real=1, virtual=beta_ve)
 
+% ------------------ 失配函数/步长/LF先验（从 V3_5 移植） ------------------
+misfitType        = 'PolarPhase';  % 'L2' | 'PolarPhase'
+alpha_hv          = 0.6;           % SoS阶段相位权重
+alpha_hv_atten    = 0.1;           % Atten阶段相位权重
+alpha_floor       = 1e-8;          % 步长下限，防止零步
+auto_dv_ratio     = 3e-3;          % alpha_cap 自动步长上限比例
+
+% 三阶段低频先验（真实数据默认开启）
+enableLFPrior     = true;
+lambda_stage      = 5e-4;
+f_stage1_cutoff   = 0.475e6;
+f_stage2_cutoff   = 0.850e6;
+% -------------------------------------------------------------------------
+
 % Load Extracted Dataset
 filename = 'BenignCyst_sparse256'; % 'BenignCyst', 'Malignancy'
 dataPath = ['SampleData/', filename, '.mat'];
@@ -368,6 +382,10 @@ gradient_img_prev = zeros(Nyi,Nxi); % Previous Gradient Image
 VEL_ESTIM = VEL_INIT; ATTEN_ESTIM = ATTEN_INIT;
 SLOW_ESTIM = 1./VEL_ESTIM + ...
     1i*sign(sign_conv)*ATTEN_ESTIM/(2*pi); % Initial Slowness Image [s/m]
+VEL_stage1_ref = [];
+VEL_stage2_ref = [];
+stage1_ref_saved = false;
+stage2_ref_saved = false;
 crange = [1350, 1600]; % For reconstruction display [m/s]
 attenrange = 10*[-1,1]; % For reconstruction display [dB/(cm MHz)]
 c0 = mean(VEL_ESTIM(:)); cutoff = 0.75; ord = Inf; % Parameters for Ringing Removal Filter
@@ -462,6 +480,17 @@ for f_idx = 1:numel(fDATA)
             prev_VE_flag = VE_flags(f_idx);
         end
 
+        if enableLFPrior && ~stage1_ref_saved && fDATA(f_idx) > f_stage1_cutoff
+            VEL_stage1_ref   = VEL_ESTIM;
+            stage1_ref_saved = true;
+            fprintf('[LF 3-stage] saved stage-1 ref at f=%.3f MHz\n', fDATA(f_idx)/1e6);
+        end
+        if enableLFPrior && ~stage2_ref_saved && fDATA(f_idx) > f_stage2_cutoff
+            VEL_stage2_ref   = VEL_ESTIM;
+            stage2_ref_saved = true;
+            fprintf('[LF 3-stage] saved stage-2 ref at f=%.3f MHz\n', fDATA(f_idx)/1e6);
+        end
+
         gradient_img = zeros(Nyi,Nxi); 
         % Generate Sources
         SRC = zeros(Nyi, Nxi, numel(tx_include_cur));
@@ -480,9 +509,15 @@ for f_idx = 1:numel(fDATA)
             % Modify Virtual Source for Attenuation
             VIRT_SRC = 1i*sign(sign_conv)*VIRT_SRC; 
         end
+        if updateAttenuation
+            alpha_hv_cur = alpha_hv_atten;
+        else
+            alpha_hv_cur = alpha_hv;
+        end
         % Build Adjoint Sources
         scaling = zeros(numel(tx_include_cur), 1);
         ADJ_SRC = zeros(Nyi, Nxi, numel(tx_include_cur));
+        phi_k_accum = 0;
         for elmt_idx = 1:numel(tx_include_cur)
             WVFIELD_elmt = WVFIELD(:,:,elmt_idx);
             tx_id = tx_include_cur(elmt_idx);
@@ -496,7 +531,21 @@ for f_idx = 1:numel(fDATA)
             scaling(elmt_idx) = (REC_SIM_scale(:)'*REC_scale(:)) / ...
                 (REC_SIM_scale(:)'*REC_SIM_scale(:)); % Source Scaling with real-Rx only
             ADJ_SRC_elmt = zeros(Nyi, Nxi);
-            residual = scaling(elmt_idx)*REC_SIM_all - REC_all;
+            p_sim_sc = scaling(elmt_idx) * REC_SIM_all;
+            switch lower(misfitType)
+                case 'l2'
+                    residual = p_sim_sc - REC_all;
+                case 'polarphase'
+                    amp_sim  = abs(p_sim_sc) + eps;
+                    phi_dir  = p_sim_sc ./ amp_sim;
+                    amp_res  = amp_sim - abs(REC_all);
+                    dphi     = angle(p_sim_sc .* conj(REC_all));
+                    residual = (1 - alpha_hv_cur) .* amp_res .* phi_dir + ...
+                               alpha_hv_cur       .* dphi    .* (1i * phi_dir);
+                otherwise
+                    error('Unknown misfitType: %s. Use ''L2'' or ''PolarPhase''.', misfitType);
+            end
+            phi_k_accum = phi_k_accum + sum(abs(residual).^2);
             % 伴随源通道加权：真实Rx=1，虚拟Rx=beta_ve
             % 目的：保留 VE 的角向补偿收益，同时抑制“非实测通道”过度主导梯度。
             w_channel = ones(sum(rx_mask_all), 1);
@@ -529,6 +578,25 @@ for f_idx = 1:numel(fDATA)
         end
         % Remove Ringing from Gradient Image
         gradient_img = ringingRemovalFilt(xi, yi, gradient_img, c0, fDATA(f_idx), cutoff, ord);
+        if enableLFPrior && ~updateAttenuation
+            lf_ref_cur   = [];
+            f_cutoff_cur = [];
+            if stage2_ref_saved && fDATA(f_idx) > f_stage2_cutoff
+                lf_ref_cur   = VEL_stage2_ref;
+                f_cutoff_cur = f_stage2_cutoff;
+            elseif stage1_ref_saved && fDATA(f_idx) > f_stage1_cutoff
+                lf_ref_cur   = VEL_stage1_ref;
+                f_cutoff_cur = f_stage1_cutoff;
+            end
+            if ~isempty(lf_ref_cur)
+                lambda_k      = lambda_stage * (f_cutoff_cur / fDATA(f_idx))^2;
+                lf_diff       = VEL_ESTIM - lf_ref_cur;
+                grad_scale_lf = max(abs(gradient_img(:))) + eps;
+                lf_diff_scale = max(abs(lf_diff(:))) + eps;
+                lf_prior_reg  = -lambda_k * grad_scale_lf * (lf_diff / lf_diff_scale);
+                gradient_img  = gradient_img + lf_prior_reg;
+            end
+        end
         % Step 2: Compute New Conjugate Gradient Search Direction from Gradient
         % Conjugate Gradient Direction Scaling Factor for Updates
         if ((iter_f_idx == 1) || (iter_f_idx == 1+niterSoSPerFreq(f_idx)))
@@ -555,7 +623,25 @@ for f_idx = 1:numel(fDATA)
         end
         % Step 4: Perform a Linear Approximation of Exact Line Search
         perc_step_size = 1; % (<1/2) Introduced to Improve Compliance with Strong Wolfe Conditions 
-        alpha = -(gradient_img(:)'*search_dir(:))/(dREC_SIM(:)'*dREC_SIM(:));
+        den_ls   = real(dREC_SIM(:)'*dREC_SIM(:));
+        num_ls   = -real(gradient_img(:)'*search_dir(:));
+        alpha_ls = num_ls / (den_ls + eps);
+        if strcmpi(misfitType, 'PolarPhase')
+            dPhi_sq_accum = 0;
+            for elmt_idx = 1:numel(tx_include_cur)
+                dREC_elmt = dREC_SIM(elmt_idx, :).';
+                dPhi_sq_accum = dPhi_sq_accum + sum(abs(dREC_elmt).^2);
+            end
+            scale_pp  = (1 - alpha_hv_cur)^2 + alpha_hv_cur^2;
+            den_ls_pp = dPhi_sq_accum * scale_pp;
+            alpha_ls  = num_ls / (den_ls_pp + eps);
+        end
+        vmean = mean(VEL_ESTIM(:));
+        target_dv_eff = auto_dv_ratio * vmean;
+        sd_max      = max(abs(search_dir(:))) + eps;
+        alpha_cap   = target_dv_eff / ((vmean^2) * sd_max + eps);
+        alpha       = min(alpha_ls, alpha_cap);
+        alpha       = max(alpha, alpha_floor);
         if updateAttenuation % Update Complex Slowness
             SI = sign(sign_conv) * imag(SLOW_ESTIM) + perc_step_size * alpha * search_dir;
             SLOW_ESTIM = real(SLOW_ESTIM) + 1i * sign(sign_conv) * SI;
@@ -564,6 +650,7 @@ for f_idx = 1:numel(fDATA)
         end 
         VEL_ESTIM = 1./real(SLOW_ESTIM); % Wave Velocity Estimate [m/s]
         ATTEN_ESTIM = 2*pi*imag(SLOW_ESTIM)*sign(sign_conv);
+        SLOW_ESTIM = 1./VEL_ESTIM + 1i*sign(sign_conv)*ATTEN_ESTIM/(2*pi);
         % Save Intermediate Results
         VEL_ESTIM_ITER(:,:,iter) = VEL_ESTIM;
         ATTEN_ESTIM_ITER(:,:,iter) = ATTEN_ESTIM;
