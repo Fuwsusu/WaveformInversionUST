@@ -45,11 +45,6 @@ numElements = size(transducerPositionsXY,2);
 fsa_rf_data = single(full_dataset);
 clearvars full_dataset;
 
-% % Extract the Desired Frequency for Waveform Inversion
-% fDATA_SoS = (0.3:0.05:1.25)*(1e6); % Frequencies for SoS-only Iterations [Hz]
-% fDATA_SoSAtten = (0.325:0.05:1.275)*(1e6); % Frequencies for SoS/Attenuation Iterations [Hz]
-% fDATA = [fDATA_SoS, fDATA_SoSAtten]; % All Frequencies [Hz]
-
 % Extract the Desired Frequency for Waveform Inversion (segmented steps)
 % Low band:  0.30-0.45 MHz, step 0.025 MHz
 % Mid band:  0.50-0.70 MHz, step 0.050 MHz
@@ -65,7 +60,9 @@ virtualElementsMode = 'unilateral';   % 'unilateral' (128->256) / 'bilateral' (1
 VE_freqMode = 'always';               % 'always' | 'threshold' | 'manual'
 VE_freqThresh = 0.75e6;               % only used in threshold mode
 VE_manualFlags = mod(0:numel(fDATA)-1,2)==1; % only used in manual mode
-frac_shift = 0.20;                    % virtual element angular offset ratio
+frac_shift_lo = 0.10;                 % low-frequency conservative VE offset
+frac_shift_hi = 0.20;                 % high-frequency default VE offset
+frac_shift_f_split = 0.45e6;          % split frequency [Hz]
 
 % Attenuation Iterations Always Happen After SoS Iterations
 niterSoSPerFreq = [3*ones(size(fDATA_SoS)), 3*ones(size(fDATA_SoSAtten))]; % Number of Sound Speed Iterations Per Frequency
@@ -189,8 +186,9 @@ geo_orig.x_circ = transducerPositionsX;
 geo_orig.y_circ = transducerPositionsY;
 geo_orig.REC_DATA = REC_DATA_orig(tx_include_orig,:,:);
 
-% Build virtual element geometry package
-geo_ve = [];
+% Build virtual element geometry package (frequency-related, two presets)
+geo_ve_lo = [];
+geo_ve_hi = [];
 if enableVirtualElements
     x_base = transducerPositionsX(:).';
     y_base = transducerPositionsY(:).';
@@ -200,94 +198,105 @@ if enableVirtualElements
     dtheta_prev = theta_base - circshift(theta_base,1);
     dtheta_prev(dtheta_prev<=0) = dtheta_prev(dtheta_prev<=0) + 2*pi;
     r_base = sqrt(x_base.^2 + y_base.^2);
-    switch lower(virtualElementsMode)
-        case 'unilateral'
-            L_ve = 2;
-            sgn = ones(size(theta_base)); sgn(2:2:end) = -1;
-            dtheta_use = dtheta_next; dtheta_use(sgn<0) = dtheta_prev(sgn<0);
-            theta_virtual = theta_base + sgn.*frac_shift.*dtheta_use;
-            x_virtual = r_base.*cos(theta_virtual);
-            y_virtual = r_base.*sin(theta_virtual);
-            x_ve = reshape([x_base; x_virtual],1,[]);
-            y_ve = reshape([y_base; y_virtual],1,[]);
-            isRealRx_ve = false(1, numel(x_ve)); isRealRx_ve(1:2:end) = true;
-        case 'bilateral'
-            L_ve = 3;
-            theta_left = theta_base - frac_shift.*dtheta_prev;
-            theta_right = theta_base + frac_shift.*dtheta_next;
-            x_left = r_base.*cos(theta_left); x_right = r_base.*cos(theta_right);
-            y_left = r_base.*sin(theta_left); y_right = r_base.*sin(theta_right);
-            x_ve = reshape([x_left; x_base; x_right],1,[]);
-            y_ve = reshape([y_left; y_base; y_right],1,[]);
-            isRealRx_ve = false(1, numel(x_ve)); isRealRx_ve(2:3:end) = true;
-        otherwise
-            error('Unknown virtualElementsMode: %s', virtualElementsMode);
-    end
+    frac_shift_build_list = [frac_shift_lo, frac_shift_hi];
+    geo_ve_built = cell(1,2);
 
-    N0 = orig_numElements;
-    H_theta = zeros(L_ve*N0, N0, 'single');
-    for n = 1:N0
+    for fsi = 1:2
+        frac_shift_cur = frac_shift_build_list(fsi);
+
         switch lower(virtualElementsMode)
             case 'unilateral'
-                H_theta(2*n-1,n) = 1;
-                H_theta(2*n,n) = 1; % zoh virtual channel
+                L_ve = 2;
+                sgn = ones(size(theta_base)); sgn(2:2:end) = -1;
+                dtheta_use = dtheta_next; dtheta_use(sgn<0) = dtheta_prev(sgn<0);
+                theta_virtual = theta_base + sgn.*frac_shift_cur.*dtheta_use;
+                x_virtual = r_base.*cos(theta_virtual);
+                y_virtual = r_base.*sin(theta_virtual);
+                x_ve = reshape([x_base; x_virtual],1,[]);
+                y_ve = reshape([y_base; y_virtual],1,[]);
             case 'bilateral'
-                H_theta(3*n-1,n) = 1;
-                H_theta(3*n-2,n) = 1;
-                H_theta(3*n,n) = 1;
+                L_ve = 3;
+                theta_left = theta_base - frac_shift_cur.*dtheta_prev;
+                theta_right = theta_base + frac_shift_cur.*dtheta_next;
+                x_left = r_base.*cos(theta_left); x_right = r_base.*cos(theta_right);
+                y_left = r_base.*sin(theta_left); y_right = r_base.*sin(theta_right);
+                x_ve = reshape([x_left; x_base; x_right],1,[]);
+                y_ve = reshape([y_left; y_base; y_right],1,[]);
+            otherwise
+                error('Unknown virtualElementsMode: %s', virtualElementsMode);
         end
-    end
-    numElements_ve = size(H_theta,1);
-    REC_DATA_ve = zeros(numElements_ve, numElements_ve, numel(fDATA), 'like', REC_DATA);
-    for f_idx = 1:numel(fDATA)
-        D0 = REC_DATA(:,:,f_idx);
-        REC_DATA_ve(:,:,f_idx) = H_theta * D0 * H_theta.';
-    end
 
-    x_idx_ve = dsearchn(xi(:), x_ve(:));
-    y_idx_ve = dsearchn(yi(:), y_ve(:));
-    ind_ve = sub2ind([Nyi, Nxi], y_idx_ve, x_idx_ve);
-    elemInclude_ve = true(numElements_ve, numElements_ve);
-    numElemLeftRightExcl_ve = round(numElemLeftRightExcl*L_ve);
-    elemLeftRightExcl_ve = -numElemLeftRightExcl_ve:numElemLeftRightExcl_ve;
-    for tx_element = 1:numElements_ve
-        ecur = elemLeftRightExcl_ve + tx_element;
-        ecur(ecur<1) = numElements_ve + ecur(ecur<1);
-        ecur(ecur>numElements_ve) = ecur(ecur>numElements_ve) - numElements_ve;
-        elemInclude_ve(tx_element,ecur) = false;
-    end
-
-    if useVirtualTx
-        tx_include_ve = 1:dwnsmp:numElements_ve;
-    else
-        switch lower(virtualElementsMode)
-            case 'unilateral'
-                tx_include_ve = 1:2:numElements_ve;
-            case 'bilateral'
-                tx_include_ve = 2:3:numElements_ve;
+        N0 = orig_numElements;
+        H_theta = zeros(L_ve*N0, N0, 'single');
+        for n = 1:N0
+            switch lower(virtualElementsMode)
+                case 'unilateral'
+                    H_theta(2*n-1,n) = 1;
+                    H_theta(2*n,n) = 1; % zoh virtual channel
+                case 'bilateral'
+                    H_theta(3*n-1,n) = 1;
+                    H_theta(3*n-2,n) = 1;
+                    H_theta(3*n,n) = 1;
+            end
         end
-        tx_include_ve = tx_include_ve(1:dwnsmp:end);
+
+        numElements_ve = size(H_theta,1);
+        REC_DATA_ve = zeros(numElements_ve, numElements_ve, numel(fDATA), 'like', REC_DATA);
+        for f_idx = 1:numel(fDATA)
+            D0 = REC_DATA(:,:,f_idx);
+            REC_DATA_ve(:,:,f_idx) = H_theta * D0 * H_theta.';
+        end
+
+        x_idx_ve = dsearchn(xi(:), x_ve(:));
+        y_idx_ve = dsearchn(yi(:), y_ve(:));
+        ind_ve = sub2ind([Nyi, Nxi], y_idx_ve, x_idx_ve);
+        elemInclude_ve = true(numElements_ve, numElements_ve);
+        numElemLeftRightExcl_ve = round(numElemLeftRightExcl*L_ve);
+        elemLeftRightExcl_ve = -numElemLeftRightExcl_ve:numElemLeftRightExcl_ve;
+        for tx_element = 1:numElements_ve
+            ecur = elemLeftRightExcl_ve + tx_element;
+            ecur(ecur<1) = numElements_ve + ecur(ecur<1);
+            ecur(ecur>numElements_ve) = ecur(ecur>numElements_ve) - numElements_ve;
+            elemInclude_ve(tx_element,ecur) = false;
+        end
+
+        if useVirtualTx
+            tx_include_ve = 1:dwnsmp:numElements_ve;
+        else
+            switch lower(virtualElementsMode)
+                case 'unilateral'
+                    tx_include_ve = 1:2:numElements_ve;
+                case 'bilateral'
+                    tx_include_ve = 2:3:numElements_ve;
+            end
+            tx_include_ve = tx_include_ve(1:dwnsmp:end);
+        end
+
+        REC_DATA_ve(isnan(REC_DATA_ve)) = 0;
+        for f_idx = 1:numel(fDATA)
+            REC_DATA_SINGLE_FREQ = REC_DATA_ve(tx_include_ve,:,f_idx);
+            signalMagnitudes = elemInclude_ve(tx_include_ve,:).*abs(REC_DATA_SINGLE_FREQ);
+            num_outliers = ceil((1-perc_outliers)*numel(signalMagnitudes));
+            [~,idx_outliers] = maxk(signalMagnitudes(:),num_outliers);
+            REC_DATA_SINGLE_FREQ(idx_outliers) = 0;
+            REC_DATA_ve(tx_include_ve,:,f_idx) = REC_DATA_SINGLE_FREQ;
+        end
+
+        geo_tmp.numElements = numElements_ve;
+        geo_tmp.tx_include = tx_include_ve;
+        geo_tmp.elemInclude = elemInclude_ve;
+        geo_tmp.x_idx = x_idx_ve;
+        geo_tmp.y_idx = y_idx_ve;
+        geo_tmp.ind = ind_ve;
+        geo_tmp.x_circ = x_ve;
+        geo_tmp.y_circ = y_ve;
+        geo_tmp.frac_shift = frac_shift_cur;
+        geo_tmp.REC_DATA = REC_DATA_ve(tx_include_ve,:,:);
+        geo_ve_built{fsi} = geo_tmp;
     end
 
-    REC_DATA_ve(isnan(REC_DATA_ve)) = 0;
-    for f_idx = 1:numel(fDATA)
-        REC_DATA_SINGLE_FREQ = REC_DATA_ve(tx_include_ve,:,f_idx);
-        signalMagnitudes = elemInclude_ve(tx_include_ve,:).*abs(REC_DATA_SINGLE_FREQ);
-        num_outliers = ceil((1-perc_outliers)*numel(signalMagnitudes));
-        [~,idx_outliers] = maxk(signalMagnitudes(:),num_outliers);
-        REC_DATA_SINGLE_FREQ(idx_outliers) = 0;
-        REC_DATA_ve(tx_include_ve,:,f_idx) = REC_DATA_SINGLE_FREQ;
-    end
-
-    geo_ve.numElements = numElements_ve;
-    geo_ve.tx_include = tx_include_ve;
-    geo_ve.elemInclude = elemInclude_ve;
-    geo_ve.x_idx = x_idx_ve;
-    geo_ve.y_idx = y_idx_ve;
-    geo_ve.ind = ind_ve;
-    geo_ve.x_circ = x_ve;
-    geo_ve.y_circ = y_ve;
-    geo_ve.REC_DATA = REC_DATA_ve(tx_include_ve,:,:);
+    geo_ve_lo = geo_ve_built{1};
+    geo_ve_hi = geo_ve_built{2};
 end
 
 % Frequency-wise VE schedule
@@ -367,8 +376,12 @@ hmain = figure(1); % Main 2x2 iterative display (same as original workflow)
 prevVEState = NaN;
 for f_idx = 1:numel(fDATA)
     % Select original / virtual geometry for this frequency
-    if VE_flags(f_idx) && ~isempty(geo_ve)
-        geo_cur = geo_ve;
+    if VE_flags(f_idx) && ~isempty(geo_ve_lo)
+        if fDATA(f_idx) < frac_shift_f_split
+            geo_cur = geo_ve_lo;
+        else
+            geo_cur = geo_ve_hi;
+        end
         veState = 1;
     else
         geo_cur = geo_orig;
