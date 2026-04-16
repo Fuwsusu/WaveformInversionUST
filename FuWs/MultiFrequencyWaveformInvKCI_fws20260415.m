@@ -49,8 +49,7 @@ clearvars full_dataset;
 % Low band:  0.30-0.45 MHz, step 0.025 MHz
 % Mid band:  0.50-0.70 MHz, step 0.050 MHz
 % High band: 0.775-1.25 MHz, step 0.075 MHz (force include 1.25)
-fDATA_SoS = [ (0.30:0.025:0.45), (0.50:0.05:0.70), ...
-    (0.775:0.075:1.225), 1.250 ]*(1e6); % Frequencies for SoS-only [Hz]
+fDATA_SoS = [ (0.30:0.025:0.45), (0.50:0.05:0.70), (0.775:0.075:1.225), 1.250 ]*(1e6); % Frequencies for SoS-only [Hz]
 fDATA_SoSAtten = fDATA_SoS + 25e3;      % SoS/Attenuation [Hz]
 fDATA = [fDATA_SoS, fDATA_SoSAtten];    % All Frequencies [Hz]
 
