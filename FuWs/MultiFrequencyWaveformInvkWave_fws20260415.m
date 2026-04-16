@@ -8,17 +8,18 @@
 %    4. GIF 预创建窗口，复用图像句柄，大幅减少每帧开销
 %    5. [修改] 已删除 PP 模块及其相关代码
 %    6. [新增] 方向A2：VE通道置信度加权（beta_ve），降低虚拟Rx插值偏差对梯度的污染
-%    8. [新增] 失配函数：misfitType 支持 'L2'（标准）和 'HV_polar'（极坐标分解）
+%    7. [新增] 失配函数：misfitType 支持 'L2'（标准）和 'HV_polar'（极坐标分解）
 %             HV_polar 将复数 phasor 分解为幅度残差（→衰减）和相位残差（→声速），
 %             分别用 alpha_hv / alpha_hv_atten 加权，缓解 L2 的周期跳跃敏感性。
 %             参考：Neumann & Yang, arXiv:2505.01817 (2025)，频域FWI + USCT验证。
-%    9. [修改] 方向E ：低频先验正则化升级为三阶段版本（enableLFPrior），
+%    8. [修改] 方向E ：低频先验正则化升级为三阶段版本（enableLFPrior），
 %             对应师兄时域FWI"均匀分三段低频复用，效果较好"的频域等价实现：
 %               阶段1（低频，< f_stage1_cutoff）：无先验约束，自由重建背景声速
 %               阶段2（中频，f_stage1~f_stage2）：约束拉向阶段1末尾参考模型
 %               阶段3（高频，> f_stage2_cutoff）：约束拉向阶段2末尾参考模型
 %             各阶段内 lambda_k = lambda_stage·(f_stageN_cutoff/f)²，频率越高约束越弱。
 %             相对归一化消除量纲不匹配（见主循环内注释）。
+%    9. [修改] 已删除方向D/F/G及正则化诊断打印相关代码
 %   10. 其余算法逻辑（Helmholtz、CG）与原版一致
 % ===========================================================================================
 clear; clc;
@@ -100,6 +101,7 @@ alpha_hv_atten = 0.1;
 beta_ve = 1.0;
 % -------------------------------------------------------------------
 
+
 % [修改] ------------------ fws: 三阶段低频先验正则化（方向E）------------------
 % 物理依据：对应师兄时域FWI"均匀分三个阶段进行低频复用，效果较好"的频域等价。
 %           时域三段方案：Low(0.3~0.6 MHz)→Mid(0.625~0.95 MHz)→High(0.975~1.25 MHz)
@@ -120,6 +122,9 @@ lambda_stage     = 5e-3;     % 各阶段约束强度（归一化后：0.1%数据
 f_stage1_cutoff  = 0.475e6;  % 阶段1/2分界 [Hz]（≈Low段末，与 frac_shift_f_split 对齐）
 f_stage2_cutoff  = 0.850e6;  % 阶段2/3分界 [Hz]（≈Mid段末，对应 fDATA_SoS 第二组末尾）
 % -----------------------------------------------------------------------
+
+
+
 
 % ------------------ fws: 高频更新可信度监控与门控 ------------------
 % 目标：避免“高频把低波数背景误差投影到高波数环状伪影”。
@@ -765,7 +770,7 @@ COS_GRAD_ITER         = nan(1, Niter);
 ALPHA_GATE_XF_ITER    = ones(1, Niter);
 
 %% ---------- 用户控制：迭代执行选项 ----------
-runAllIterations    = true;
+runAllIterations    = false;
 requestedIterations = 60;
 if requestedIterations >= Niter, runAllIterations = true; end
 savedIters   = [];
@@ -1026,13 +1031,9 @@ for f_idx = 1:numel(fDATA)
             gradient_img = gradient_img + BACKPROJ(:,:,elmt_idx);
         end
 
-
         % Remove Ringing from Data Gradient (先滤数据梯度，再叠加正则，避免正则被低通抹掉)
         gradient_img = ringingRemovalFilt(xi_original, yi_original, ...
             gradient_img, c0, fDATA(f_idx), cutoff, ord);
-        data_grad_peak_base = max(abs(gradient_img(:))) + eps;
-        reg_lf_peak    = 0;
-        reg_edge_peak  = 0;
 
         % [修改] ---- 三阶段低频先验正则化梯度项（方向E）----
         % 根据当前频率所处阶段，选择对应的参考模型施加 Tikhonov 约束：
@@ -1065,12 +1066,10 @@ for f_idx = 1:numel(fDATA)
                 lf_diff_scale = max(abs(lf_diff(:))) + eps;            % 速度差幅值锚点
                 lf_prior_reg  = -lambda_k * grad_scale_lf * (lf_diff / lf_diff_scale);
                 gradient_img  = gradient_img + lf_prior_reg;
-                reg_lf_peak   = max(abs(lf_prior_reg(:)));
             end
         end
         % -----------------------------------------------------------------------
 
-        ring_k = nan;
 
         % [新增] ---- 高频外环锚定（边界保护）----
         % 仅在高频SoS阶段启用：抑制中心结构误差向背景外圈扩散
@@ -1092,7 +1091,6 @@ for f_idx = 1:numel(fDATA)
             lambda_edge_eff = lambda_edge_anchor * (f_edge_guard_start / fDATA(f_idx))^2;
             edge_anchor_reg = -lambda_edge_eff * grad_scale_edge * (edge_diff / edge_scale);
             gradient_img = gradient_img + edge_anchor_reg;
-            reg_edge_peak = max(abs(edge_anchor_reg(:)));
             edge_contam_k = mean(abs(edge_diff(edge_outer_mask)), 'omitnan');
         end
         % -----------------------------------------------------------------------
@@ -1111,6 +1109,19 @@ for f_idx = 1:numel(fDATA)
         % end
         % search_dir        = beta*search_dir - gradient_img;
         % gradient_img_prev = gradient_img;
+
+        % fws: 环伪影比监控（保留R_k统计，但不再施加TV/Polar正则）
+        % 用当前梯度图的径向梯度占比评估同心环趋势，供可信度门控使用。
+        [gx_ring, gy_ring] = gradient(gradient_img, dxi_original, dxi_original);
+        R_pol  = sqrt(Xi.^2 + Yi.^2) + eps;
+        er_x   = Xi ./ R_pol;
+        er_y   = Yi ./ R_pol;
+        grad_radial = gx_ring .* er_x + gy_ring .* er_y;
+        grad_mag    = sqrt(gx_ring.^2 + gy_ring.^2);
+        num_ring    = mean(abs(grad_radial(ring_bg_mask)), 'omitnan');
+        den_ring    = mean(grad_mag(ring_bg_mask), 'omitnan') + eps;
+        ring_k      = num_ring / den_ring;
+
 
         % Step 2: Compute New Conjugate Gradient Search Direction from Gradient
         % 使用 PR+ / FR 混合截断的非线性共轭梯度（NLCG）：
@@ -1226,7 +1237,7 @@ for f_idx = 1:numel(fDATA)
             end
         end
 
-        % 可信度门控：根据 ΔΦ/τ/R 动态缩步与增强径向TV
+        % 可信度门控：根据 ΔΦ/τ/R 动态缩步
         alpha_gate = 1.0;
         if enableTrustGate && ~isnan(delta_phi_k)
             bad_fit = (delta_phi_k <= 0);
@@ -1689,7 +1700,6 @@ save(filename_results, '-v7.3', ...
     'enableLFPrior', 'lambda_stage', 'f_stage1_cutoff', 'f_stage2_cutoff', ...
     'stage1_ref_saved', 'stage2_ref_saved', ...
     'enableTrustGate','phi_small_drop_ratio','tau_rise_ratio','ring_rise_ratio', ...
-    'alpha_gate_badfit','alpha_gate_ringgrowth', ...
     'enableCrossFreqTrust','clf_warn','clf_rise_ratio','sigma_bg_warn', ...
     'cos_grad_warn','alpha_gate_xf_min','water_bg_inner_ratio','water_bg_outer_ratio', ...
     'enableEdgeGuard','f_edge_guard_start', ...
