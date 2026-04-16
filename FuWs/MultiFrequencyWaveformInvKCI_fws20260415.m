@@ -60,9 +60,10 @@ virtualElementsMode = 'unilateral';   % 'unilateral' (128->256) / 'bilateral' (1
 VE_freqMode = 'always';               % 'always' | 'threshold' | 'manual'
 VE_freqThresh = 0.75e6;               % only used in threshold mode
 VE_manualFlags = mod(0:numel(fDATA)-1,2)==1; % only used in manual mode
-frac_shift_lo = 0.10;                 % low-frequency conservative VE offset
-frac_shift_hi = 0.20;                 % high-frequency default VE offset
+frac_shift_lo = 0.05;                 % low-frequency conservative VE offset
+frac_shift_hi = 0.10;                 % high-frequency default VE offset
 frac_shift_f_split = 0.45e6;          % split frequency [Hz]
+beta_ve = 0.8;                        % virtual-Rx residual weight
 
 % Attenuation Iterations Always Happen After SoS Iterations
 niterSoSPerFreq = [3*ones(size(fDATA_SoS)), 3*ones(size(fDATA_SoSAtten))]; % Number of Sound Speed Iterations Per Frequency
@@ -179,6 +180,7 @@ end
 geo_orig.numElements = orig_numElements;
 geo_orig.tx_include = tx_include_orig;
 geo_orig.elemInclude = elemInclude_orig;
+geo_orig.isRealRx = true(1, orig_numElements);
 geo_orig.x_idx = x_idx;
 geo_orig.y_idx = y_idx;
 geo_orig.ind = ind;
@@ -190,8 +192,13 @@ geo_orig.REC_DATA = REC_DATA_orig(tx_include_orig,:,:);
 geo_ve_lo = [];
 geo_ve_hi = [];
 if enableVirtualElements
+    virtualInterpKernel = 'zoh';   % 'zoh' | 'linear' | 'cubic'
+    keys_a = -0.5;                 % Keys cubic parameter
+
     x_base = transducerPositionsX(:).';
     y_base = transducerPositionsY(:).';
+    x_idx_base = x_idx(:);
+    y_idx_base = y_idx(:);
     theta_base = unwrap(atan2(y_base, x_base));
     dtheta_next = circshift(theta_base,-1) - theta_base;
     dtheta_next(dtheta_next<=0) = dtheta_next(dtheta_next<=0) + 2*pi;
@@ -203,6 +210,7 @@ if enableVirtualElements
 
     for fsi = 1:2
         frac_shift_cur = frac_shift_build_list(fsi);
+        N0 = orig_numElements;
 
         switch lower(virtualElementsMode)
             case 'unilateral'
@@ -226,30 +234,110 @@ if enableVirtualElements
                 error('Unknown virtualElementsMode: %s', virtualElementsMode);
         end
 
-        N0 = orig_numElements;
         H_theta = zeros(L_ve*N0, N0, 'single');
         for n = 1:N0
             switch lower(virtualElementsMode)
                 case 'unilateral'
                     H_theta(2*n-1,n) = 1;
-                    H_theta(2*n,n) = 1; % zoh virtual channel
+                    switch lower(virtualInterpKernel)
+                        case 'zoh'
+                            H_theta(2*n,n) = 1;
+                        case 'linear'
+                            if sgn(n) > 0
+                                nb = n+1; if nb>N0, nb=1; end
+                            else
+                                nb = n-1; if nb<1, nb=N0; end
+                            end
+                            H_theta(2*n,n) = 1-frac_shift_cur;
+                            H_theta(2*n,nb) = frac_shift_cur;
+                        case 'cubic'
+                            if sgn(n) > 0
+                                idx_v = mod([n-1,n,n+1,n+2]-1,N0)+1;
+                                w_v = keysCubicWeights(frac_shift_cur, keys_a);
+                            else
+                                idx_v = mod([n-2,n-1,n,n+1]-1,N0)+1;
+                                w_v = keysCubicWeights(1-frac_shift_cur, keys_a);
+                            end
+                            w_v = w_v/(sum(w_v)+eps);
+                            for kk = 1:4
+                                H_theta(2*n, idx_v(kk)) = w_v(kk);
+                            end
+                        otherwise
+                            error('Unknown virtualInterpKernel.');
+                    end
+
                 case 'bilateral'
                     H_theta(3*n-1,n) = 1;
-                    H_theta(3*n-2,n) = 1;
-                    H_theta(3*n,n) = 1;
+                    nb_prev = n-1; if nb_prev<1, nb_prev=N0; end
+                    nb_next = n+1; if nb_next>N0, nb_next=1; end
+                    switch lower(virtualInterpKernel)
+                        case 'zoh'
+                            H_theta(3*n-2,n) = 1;
+                            H_theta(3*n,n) = 1;
+                        case 'linear'
+                            H_theta(3*n-2,n) = 1-frac_shift_cur;
+                            H_theta(3*n-2,nb_prev) = frac_shift_cur;
+                            H_theta(3*n,n) = 1-frac_shift_cur;
+                            H_theta(3*n,nb_next) = frac_shift_cur;
+                        case 'cubic'
+                            idx_L = mod([n-2,n-1,n,n+1]-1,N0)+1;
+                            w_L = keysCubicWeights(1-frac_shift_cur, keys_a);
+                            w_L = w_L/(sum(w_L)+eps);
+                            for kk = 1:4
+                                H_theta(3*n-2, idx_L(kk)) = w_L(kk);
+                            end
+                            idx_R = mod([n-1,n,n+1,n+2]-1,N0)+1;
+                            w_R = keysCubicWeights(frac_shift_cur, keys_a);
+                            w_R = w_R/(sum(w_R)+eps);
+                            for kk = 1:4
+                                H_theta(3*n, idx_R(kk)) = w_R(kk);
+                            end
+                        otherwise
+                            error('Unknown virtualInterpKernel.');
+                    end
             end
         end
 
         numElements_ve = size(H_theta,1);
-        REC_DATA_ve = zeros(numElements_ve, numElements_ve, numel(fDATA), 'like', REC_DATA);
+        REC_DATA_ve_full = zeros(numElements_ve, numElements_ve, numel(fDATA), 'like', REC_DATA);
         for f_idx = 1:numel(fDATA)
             D0 = REC_DATA(:,:,f_idx);
-            REC_DATA_ve(:,:,f_idx) = H_theta * D0 * H_theta.';
+            REC_DATA_ve_full(:,:,f_idx) = H_theta * D0 * H_theta.';
         end
+
+        base_map = repelem(1:N0, L_ve);
 
         x_idx_ve = dsearchn(xi(:), x_ve(:));
         y_idx_ve = dsearchn(yi(:), y_ve(:));
         ind_ve = sub2ind([Nyi, Nxi], y_idx_ve, x_idx_ve);
+
+        % TOF-based phase transport
+        x_base_disc = xi(x_idx_base); y_base_disc = yi(y_idx_base);
+        [Xb_tx, Xb_rx] = meshgrid(x_base_disc, x_base_disc);
+        [Yb_tx, Yb_rx] = meshgrid(y_base_disc, y_base_disc);
+        TOF_base_disc = sqrt((Xb_tx-Xb_rx).^2 + (Yb_tx-Yb_rx).^2)/c_geom;
+        TOF_base_disc_mapped = TOF_base_disc(base_map, base_map);
+
+        x_new_disc = xi(x_idx_ve); y_new_disc = yi(y_idx_ve);
+        [Xn_tx, Xn_rx] = meshgrid(x_new_disc, x_new_disc);
+        [Yn_tx, Yn_rx] = meshgrid(y_new_disc, y_new_disc);
+        TOF_new_disc = sqrt((Xn_tx-Xn_rx).^2 + (Yn_tx-Yn_rx).^2)/c_geom;
+        dTOF = single(TOF_new_disc - TOF_base_disc_mapped);
+
+        for f_idx = 1:numel(fDATA)
+            REC_DATA_ve_full(:,:,f_idx) = REC_DATA_ve_full(:,:,f_idx) .* ...
+                exp(1i*sign_conv*2*pi*fDATA(f_idx)*dTOF);
+        end
+
+        % Real/virtual Rx flags
+        isRealRx_ve = false(1, numElements_ve);
+        switch lower(virtualElementsMode)
+            case 'unilateral'
+                isRealRx_ve(1:L_ve:end) = true;
+            case 'bilateral'
+                isRealRx_ve(2:L_ve:end) = true;
+        end
+
         elemInclude_ve = true(numElements_ve, numElements_ve);
         numElemLeftRightExcl_ve = round(numElemLeftRightExcl*L_ve);
         elemLeftRightExcl_ve = -numElemLeftRightExcl_ve:numElemLeftRightExcl_ve;
@@ -265,33 +353,34 @@ if enableVirtualElements
         else
             switch lower(virtualElementsMode)
                 case 'unilateral'
-                    tx_include_ve = 1:2:numElements_ve;
+                    tx_include_ve = 1:L_ve:numElements_ve;
                 case 'bilateral'
-                    tx_include_ve = 2:3:numElements_ve;
+                    tx_include_ve = 2:L_ve:numElements_ve;
             end
             tx_include_ve = tx_include_ve(1:dwnsmp:end);
         end
 
-        REC_DATA_ve(isnan(REC_DATA_ve)) = 0;
+        REC_DATA_ve_full(isnan(REC_DATA_ve_full)) = 0;
         for f_idx = 1:numel(fDATA)
-            REC_DATA_SINGLE_FREQ = REC_DATA_ve(tx_include_ve,:,f_idx);
+            REC_DATA_SINGLE_FREQ = REC_DATA_ve_full(tx_include_ve,:,f_idx);
             signalMagnitudes = elemInclude_ve(tx_include_ve,:).*abs(REC_DATA_SINGLE_FREQ);
             num_outliers = ceil((1-perc_outliers)*numel(signalMagnitudes));
             [~,idx_outliers] = maxk(signalMagnitudes(:),num_outliers);
             REC_DATA_SINGLE_FREQ(idx_outliers) = 0;
-            REC_DATA_ve(tx_include_ve,:,f_idx) = REC_DATA_SINGLE_FREQ;
+            REC_DATA_ve_full(tx_include_ve,:,f_idx) = REC_DATA_SINGLE_FREQ;
         end
 
         geo_tmp.numElements = numElements_ve;
         geo_tmp.tx_include = tx_include_ve;
         geo_tmp.elemInclude = elemInclude_ve;
+        geo_tmp.isRealRx = isRealRx_ve;
         geo_tmp.x_idx = x_idx_ve;
         geo_tmp.y_idx = y_idx_ve;
         geo_tmp.ind = ind_ve;
         geo_tmp.x_circ = x_ve;
         geo_tmp.y_circ = y_ve;
         geo_tmp.frac_shift = frac_shift_cur;
-        geo_tmp.REC_DATA = REC_DATA_ve(tx_include_ve,:,:);
+        geo_tmp.REC_DATA = REC_DATA_ve_full(tx_include_ve,:,:);
         geo_ve_built{fsi} = geo_tmp;
     end
 
@@ -373,22 +462,25 @@ if saveGIF
     ylabel(axgif, 'Axial [m]');
 end
 hmain = figure(1); % Main 2x2 iterative display (same as original workflow)
-prevVEState = NaN;
+prevGeoTag = NaN;
 for f_idx = 1:numel(fDATA)
     % Select original / virtual geometry for this frequency
     if VE_flags(f_idx) && ~isempty(geo_ve_lo)
         if fDATA(f_idx) < frac_shift_f_split
             geo_cur = geo_ve_lo;
+            geoTag = 1;
         else
             geo_cur = geo_ve_hi;
+            geoTag = 2;
         end
-        veState = 1;
     else
         geo_cur = geo_orig;
-        veState = 0;
+        geoTag = 0;
     end
+
     tx_include_cur = geo_cur.tx_include;
     elemInclude_cur = geo_cur.elemInclude;
+    isRealRx_cur = geo_cur.isRealRx;
     x_idx_cur = geo_cur.x_idx;
     y_idx_cur = geo_cur.y_idx;
     ind_cur = geo_cur.ind;
@@ -398,11 +490,11 @@ for f_idx = 1:numel(fDATA)
     REC_DATA_CUR = geo_cur.REC_DATA(:,:,f_idx);
 
     % If geometry switches between adjacent frequencies, reset CG memory
-    if ~isnan(prevVEState) && (veState ~= prevVEState)
+    if ~isnan(prevGeoTag) && (geoTag ~= prevGeoTag)
         search_dir = zeros(Nyi, Nxi);
         gradient_img_prev = zeros(Nyi, Nxi);
     end
-    prevVEState = veState;
+    prevGeoTag = geoTag;
 
     % Iterations at Each Frequency
     for iter_f_idx = 1:(niterSoSPerFreq(f_idx)+niterAttenPerFreq(f_idx))
@@ -447,15 +539,30 @@ for f_idx = 1:numel(fDATA)
         scaling = zeros(numel(tx_include_cur), 1);
         ADJ_SRC = zeros(Nyi, Nxi, numel(tx_include_cur));
         for elmt_idx = 1:numel(tx_include_cur)
+            tx_id = tx_include_cur(elmt_idx);
             WVFIELD_elmt = WVFIELD(:,:,elmt_idx);
-            REC_SIM = WVFIELD_elmt(ind_cur(elemInclude_cur(tx_include_cur(elmt_idx),:))); 
-            REC = REC_DATA_CUR(elmt_idx, ...
-                elemInclude_cur(tx_include_cur(elmt_idx),:)); REC = REC(:);
-            scaling(elmt_idx) = (REC_SIM(:)'*REC(:)) / ...
-                (REC_SIM(:)'*REC_SIM(:)); % Source Scaling
+
+            rx_mask_all = elemInclude_cur(tx_id,:);
+            idx_all = ind_cur(rx_mask_all);
+            REC_SIM_all = WVFIELD_elmt(idx_all);
+            REC_all = REC_DATA_CUR(elmt_idx, rx_mask_all).';
+            
+            % scaling only on real receivers
+            rx_mask_scale = rx_mask_all & isRealRx_cur;
+            idx_scale = ind_cur(rx_mask_scale);
+            REC_SIM_scale = WVFIELD_elmt(idx_scale);
+            REC_scale = REC_DATA_CUR(elmt_idx, rx_mask_scale).';
+            scaling(elmt_idx) = (REC_SIM_scale(:)'*REC_scale(:)) / ...
+                ((REC_SIM_scale(:)'*REC_SIM_scale(:)) + eps);
+
             ADJ_SRC_elmt = zeros(Nyi, Nxi);
-            ADJ_SRC_elmt(ind_cur(elemInclude_cur(tx_include_cur(elmt_idx),:))) = ...
-                scaling(elmt_idx)*REC_SIM - REC;
+            residual = scaling(elmt_idx)*REC_SIM_all - REC_all;
+
+            % weight virtual receivers
+            w_channel = ones(sum(rx_mask_all),1);
+            w_channel(~isRealRx_cur(rx_mask_all)) = beta_ve;
+
+            ADJ_SRC_elmt(idx_all) = w_channel .* residual;
             ADJ_SRC(:,:,elmt_idx) = ADJ_SRC_elmt;
         end
         % Backproject Error
@@ -816,4 +923,22 @@ end
 [~, idx] = min(dist2, [], 2);
 idx = reshape(idx, size(rgb,1), size(rgb,2));
 velMap = crange(1) + (double(idx)-1)/(size(cmap,1)-1) * (crange(2)-crange(1));
+end
+
+function w = keysCubicWeights(alpha, a)
+% alpha in [0,1], Keys cubic convolution kernel parameter a
+% weights correspond to samples [n-1, n, n+1, n+2]
+p = [-1, 0, 1, 2];
+d = abs(alpha - p);
+w = zeros(1,4);
+for i = 1:4
+    x = d(i);
+    if x < 1
+        w(i) = (a+2)*x^3 - (a+3)*x^2 + 1;
+    elseif x < 2
+        w(i) = a*x^3 - 5*a*x^2 + 8*a*x - 4*a;
+    else
+        w(i) = 0;
+    end
+end
 end
