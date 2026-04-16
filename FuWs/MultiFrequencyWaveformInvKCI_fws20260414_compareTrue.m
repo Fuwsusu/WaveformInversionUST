@@ -45,23 +45,10 @@ numElements = size(transducerPositionsXY,2);
 fsa_rf_data = single(full_dataset);
 clearvars full_dataset;
 
-% Extract the Desired Frequency for Waveform Inversion (segmented steps)
-% Low band:  0.30-0.45 MHz, step 0.025 MHz
-% Mid band:  0.50-0.70 MHz, step 0.050 MHz
-% High band: 0.775-1.25 MHz, step 0.075 MHz (force include 1.25)
-fDATA_SoS = [ (0.30:0.025:0.45), (0.50:0.05:0.70), ...
-    (0.775:0.075:1.225), 1.250 ]*(1e6); % Frequencies for SoS-only [Hz]
-fDATA_SoSAtten = fDATA_SoS + 25e3;      % SoS/Attenuation [Hz]
-fDATA = [fDATA_SoS, fDATA_SoSAtten];    % All Frequencies [Hz]
-
-% Virtual element controls
-enableVirtualElements = true;         % true: build/use virtual receive aperture
-useVirtualTx = false;                 % true: virtual elements can also transmit
-virtualElementsMode = 'unilateral';   % 'unilateral' (128->256) / 'bilateral' (128->384)
-VE_freqMode = 'always';               % 'always' | 'threshold' | 'manual'
-VE_freqThresh = 0.75e6;               % only used in threshold mode
-VE_manualFlags = mod(0:numel(fDATA)-1,2)==1; % only used in manual mode
-frac_shift = 0.20;                    % virtual element angular offset ratio
+% Extract the Desired Frequency for Waveform Inversion
+fDATA_SoS = (0.3:0.05:1.25)*(1e6); % Frequencies for SoS-only Iterations [Hz]
+fDATA_SoSAtten = (0.325:0.05:1.275)*(1e6); % Frequencies for SoS/Attenuation Iterations [Hz]
+fDATA = [fDATA_SoS, fDATA_SoSAtten]; % All Frequencies [Hz]
 
 % Attenuation Iterations Always Happen After SoS Iterations
 niterSoSPerFreq = [3*ones(size(fDATA_SoS)), 3*ones(size(fDATA_SoSAtten))]; % Number of Sound Speed Iterations Per Frequency
@@ -146,162 +133,32 @@ clearvars geom_distance col PS geomTOFs_error geomTOFs_disc geomTOFs;
 
 % Which Subset of Transmits to Use
 dwnsmp = 1; % can be 1, 2, or 4 (faster but less quality with more downsampling)
-orig_numElements = numElements;
+tx_include = 1:dwnsmp:numElements;
+REC_DATA = REC_DATA(tx_include,:,:); 
+REC_DATA(isnan(REC_DATA)) = 0; % Eliminate Blank Channel
 
-% Build original geometry package
+% Extract Subset of Times within Acceptance Angle
 numElemLeftRightExcl = 63;
 elemLeftRightExcl = -numElemLeftRightExcl:numElemLeftRightExcl;
-elemInclude_orig = true(orig_numElements, orig_numElements);
-for tx_element = 1:orig_numElements
+elemInclude = true(numElements, numElements);
+for tx_element = 1:numElements 
     elemLeftRightExclCurrent = elemLeftRightExcl + tx_element;
-    elemLeftRightExclCurrent(elemLeftRightExclCurrent<1) = orig_numElements + ...
+    elemLeftRightExclCurrent(elemLeftRightExclCurrent<1) = numElements + ...
          elemLeftRightExclCurrent(elemLeftRightExclCurrent<1);
-    elemLeftRightExclCurrent(elemLeftRightExclCurrent>orig_numElements) = ...
-        elemLeftRightExclCurrent(elemLeftRightExclCurrent>orig_numElements) - orig_numElements;
-    elemInclude_orig(tx_element,elemLeftRightExclCurrent) = false;
+    elemLeftRightExclCurrent(elemLeftRightExclCurrent>numElements) = ...
+        elemLeftRightExclCurrent(elemLeftRightExclCurrent>numElements) - numElements;
+    elemInclude(tx_element,elemLeftRightExclCurrent) = false;
 end
-tx_include_orig = 1:dwnsmp:orig_numElements;
-REC_DATA_orig = REC_DATA;
-REC_DATA_orig(isnan(REC_DATA_orig)) = 0;
 
-% Remove outliers (original geometry)
-perc_outliers = 0.99;
+% Remove Outliers from Observed Signals Prior to Waveform Inversion
+perc_outliers = 0.99; % Confidence Interval Cutoff
 for f_idx = 1:numel(fDATA)
-    REC_DATA_SINGLE_FREQ = REC_DATA_orig(tx_include_orig,:,f_idx);
-    signalMagnitudes = elemInclude_orig(tx_include_orig,:).*abs(REC_DATA_SINGLE_FREQ);
+    REC_DATA_SINGLE_FREQ = REC_DATA(:,:,f_idx); 
+    signalMagnitudes = elemInclude(tx_include,:).*abs(REC_DATA_SINGLE_FREQ);
     num_outliers = ceil((1-perc_outliers)*numel(signalMagnitudes));
     [~,idx_outliers] = maxk(signalMagnitudes(:),num_outliers);
     REC_DATA_SINGLE_FREQ(idx_outliers) = 0;
-    REC_DATA_orig(tx_include_orig,:,f_idx) = REC_DATA_SINGLE_FREQ;
-end
-
-geo_orig.numElements = orig_numElements;
-geo_orig.tx_include = tx_include_orig;
-geo_orig.elemInclude = elemInclude_orig;
-geo_orig.x_idx = x_idx;
-geo_orig.y_idx = y_idx;
-geo_orig.ind = ind;
-geo_orig.x_circ = transducerPositionsX;
-geo_orig.y_circ = transducerPositionsY;
-geo_orig.REC_DATA = REC_DATA_orig(tx_include_orig,:,:);
-
-% Build virtual element geometry package
-geo_ve = [];
-if enableVirtualElements
-    x_base = transducerPositionsX(:).';
-    y_base = transducerPositionsY(:).';
-    theta_base = unwrap(atan2(y_base, x_base));
-    dtheta_next = circshift(theta_base,-1) - theta_base;
-    dtheta_next(dtheta_next<=0) = dtheta_next(dtheta_next<=0) + 2*pi;
-    dtheta_prev = theta_base - circshift(theta_base,1);
-    dtheta_prev(dtheta_prev<=0) = dtheta_prev(dtheta_prev<=0) + 2*pi;
-    r_base = sqrt(x_base.^2 + y_base.^2);
-    switch lower(virtualElementsMode)
-        case 'unilateral'
-            L_ve = 2;
-            sgn = ones(size(theta_base)); sgn(2:2:end) = -1;
-            dtheta_use = dtheta_next; dtheta_use(sgn<0) = dtheta_prev(sgn<0);
-            theta_virtual = theta_base + sgn.*frac_shift.*dtheta_use;
-            x_virtual = r_base.*cos(theta_virtual);
-            y_virtual = r_base.*sin(theta_virtual);
-            x_ve = reshape([x_base; x_virtual],1,[]);
-            y_ve = reshape([y_base; y_virtual],1,[]);
-            isRealRx_ve = false(1, numel(x_ve)); isRealRx_ve(1:2:end) = true; %#ok<NASGU>
-        case 'bilateral'
-            L_ve = 3;
-            theta_left = theta_base - frac_shift.*dtheta_prev;
-            theta_right = theta_base + frac_shift.*dtheta_next;
-            x_left = r_base.*cos(theta_left); x_right = r_base.*cos(theta_right);
-            y_left = r_base.*sin(theta_left); y_right = r_base.*sin(theta_right);
-            x_ve = reshape([x_left; x_base; x_right],1,[]);
-            y_ve = reshape([y_left; y_base; y_right],1,[]);
-            isRealRx_ve = false(1, numel(x_ve)); isRealRx_ve(2:3:end) = true; %#ok<NASGU>
-        otherwise
-            error('Unknown virtualElementsMode: %s', virtualElementsMode);
-    end
-
-    N0 = orig_numElements;
-    H_theta = zeros(L_ve*N0, N0, 'single');
-    for n = 1:N0
-        switch lower(virtualElementsMode)
-            case 'unilateral'
-                H_theta(2*n-1,n) = 1;
-                H_theta(2*n,n) = 1; % zoh virtual channel
-            case 'bilateral'
-                H_theta(3*n-1,n) = 1;
-                H_theta(3*n-2,n) = 1;
-                H_theta(3*n,n) = 1;
-        end
-    end
-    numElements_ve = size(H_theta,1);
-    REC_DATA_ve = zeros(numElements_ve, numElements_ve, numel(fDATA), 'like', REC_DATA);
-    for f_idx = 1:numel(fDATA)
-        D0 = REC_DATA(:,:,f_idx);
-        REC_DATA_ve(:,:,f_idx) = H_theta * D0 * H_theta.';
-    end
-
-    x_idx_ve = dsearchn(xi(:), x_ve(:));
-    y_idx_ve = dsearchn(yi(:), y_ve(:));
-    ind_ve = sub2ind([Nyi, Nxi], y_idx_ve, x_idx_ve);
-    elemInclude_ve = true(numElements_ve, numElements_ve);
-    numElemLeftRightExcl_ve = round(numElemLeftRightExcl*L_ve);
-    elemLeftRightExcl_ve = -numElemLeftRightExcl_ve:numElemLeftRightExcl_ve;
-    for tx_element = 1:numElements_ve
-        ecur = elemLeftRightExcl_ve + tx_element;
-        ecur(ecur<1) = numElements_ve + ecur(ecur<1);
-        ecur(ecur>numElements_ve) = ecur(ecur>numElements_ve) - numElements_ve;
-        elemInclude_ve(tx_element,ecur) = false;
-    end
-
-    if useVirtualTx
-        tx_include_ve = 1:dwnsmp:numElements_ve;
-    else
-        switch lower(virtualElementsMode)
-            case 'unilateral'
-                tx_include_ve = 1:2:numElements_ve;
-            case 'bilateral'
-                tx_include_ve = 2:3:numElements_ve;
-        end
-        tx_include_ve = tx_include_ve(1:dwnsmp:end);
-    end
-
-    REC_DATA_ve(isnan(REC_DATA_ve)) = 0;
-    for f_idx = 1:numel(fDATA)
-        REC_DATA_SINGLE_FREQ = REC_DATA_ve(tx_include_ve,:,f_idx);
-        signalMagnitudes = elemInclude_ve(tx_include_ve,:).*abs(REC_DATA_SINGLE_FREQ);
-        num_outliers = ceil((1-perc_outliers)*numel(signalMagnitudes));
-        [~,idx_outliers] = maxk(signalMagnitudes(:),num_outliers);
-        REC_DATA_SINGLE_FREQ(idx_outliers) = 0;
-        REC_DATA_ve(tx_include_ve,:,f_idx) = REC_DATA_SINGLE_FREQ;
-    end
-
-    geo_ve.numElements = numElements_ve;
-    geo_ve.tx_include = tx_include_ve;
-    geo_ve.elemInclude = elemInclude_ve;
-    geo_ve.x_idx = x_idx_ve;
-    geo_ve.y_idx = y_idx_ve;
-    geo_ve.ind = ind_ve;
-    geo_ve.x_circ = x_ve;
-    geo_ve.y_circ = y_ve;
-    geo_ve.REC_DATA = REC_DATA_ve(tx_include_ve,:,:);
-end
-
-% Frequency-wise VE schedule
-VE_flags = false(1, numel(fDATA));
-if enableVirtualElements
-    switch lower(VE_freqMode)
-        case 'always'
-            VE_flags(:) = true;
-        case 'threshold'
-            VE_flags = (fDATA >= VE_freqThresh);
-        case 'manual'
-            if numel(VE_manualFlags) ~= numel(fDATA)
-                error('VE_manualFlags length must equal numel(fDATA).');
-            end
-            VE_flags = logical(VE_manualFlags(:).');
-        otherwise
-            error('Unknown VE_freqMode: %s', VE_freqMode);
-    end
+    REC_DATA(:,:,f_idx) = REC_DATA_SINGLE_FREQ;
 end
 
 % Initial Constant Sound Speed Map [m/s]
@@ -360,33 +217,7 @@ if saveGIF
     ylabel(axgif, 'Axial [m]');
 end
 hmain = figure(1); % Main 2x2 iterative display (same as original workflow)
-prevVEState = NaN;
 for f_idx = 1:numel(fDATA)
-    % Select original / virtual geometry for this frequency
-    if VE_flags(f_idx) && ~isempty(geo_ve)
-        geo_cur = geo_ve;
-        veState = 1;
-    else
-        geo_cur = geo_orig;
-        veState = 0;
-    end
-    tx_include_cur = geo_cur.tx_include;
-    elemInclude_cur = geo_cur.elemInclude;
-    x_idx_cur = geo_cur.x_idx;
-    y_idx_cur = geo_cur.y_idx;
-    ind_cur = geo_cur.ind;
-    x_circ_cur = geo_cur.x_circ;
-    y_circ_cur = geo_cur.y_circ;
-    numElements_cur = geo_cur.numElements;
-    REC_DATA_CUR = geo_cur.REC_DATA(:,:,f_idx);
-
-    % If geometry switches between adjacent frequencies, reset CG memory
-    if ~isnan(prevVEState) && (veState ~= prevVEState)
-        search_dir = zeros(Nyi, Nxi);
-        gradient_img_prev = zeros(Nyi, Nxi);
-    end
-    prevVEState = veState;
-
     % Iterations at Each Frequency
     for iter_f_idx = 1:(niterSoSPerFreq(f_idx)+niterAttenPerFreq(f_idx))
         iter = iter_f_idx + sum(niterSoSPerFreq(1:f_idx-1)) + ...
@@ -410,11 +241,11 @@ for f_idx = 1:numel(fDATA)
         end
         gradient_img = zeros(Nyi,Nxi); 
         % Generate Sources
-        SRC = zeros(Nyi, Nxi, numel(tx_include_cur));
-        for elmt_idx = 1:numel(tx_include_cur)
+        SRC = zeros(Nyi, Nxi, numel(tx_include));
+        for elmt_idx = 1:numel(tx_include)
             % Single Element Source
-            x_idx_src = x_idx_cur(tx_include_cur(elmt_idx)); 
-            y_idx_src = y_idx_cur(tx_include_cur(elmt_idx)); 
+            x_idx_src = x_idx(tx_include(elmt_idx)); 
+            y_idx_src = y_idx(tx_include(elmt_idx)); 
             SRC(y_idx_src, x_idx_src, elmt_idx) = 1; 
         end
         % Forward Solve Helmholtz Equation
@@ -427,17 +258,17 @@ for f_idx = 1:numel(fDATA)
             VIRT_SRC = 1i*sign(sign_conv)*VIRT_SRC; 
         end
         % Build Adjoint Sources
-        scaling = zeros(numel(tx_include_cur), 1);
-        ADJ_SRC = zeros(Nyi, Nxi, numel(tx_include_cur));
-        for elmt_idx = 1:numel(tx_include_cur)
+        scaling = zeros(numel(tx_include), 1);
+        ADJ_SRC = zeros(Nyi, Nxi, numel(tx_include));
+        for elmt_idx = 1:numel(tx_include)
             WVFIELD_elmt = WVFIELD(:,:,elmt_idx);
-            REC_SIM = WVFIELD_elmt(ind_cur(elemInclude_cur(tx_include_cur(elmt_idx),:))); 
-            REC = REC_DATA_CUR(elmt_idx, ...
-                elemInclude_cur(tx_include_cur(elmt_idx),:)); REC = REC(:);
+            REC_SIM = WVFIELD_elmt(ind(elemInclude(tx_include(elmt_idx),:))); 
+            REC = REC_DATA(elmt_idx, ...
+                elemInclude(tx_include(elmt_idx),:), f_idx); REC = REC(:);
             scaling(elmt_idx) = (REC_SIM(:)'*REC(:)) / ...
                 (REC_SIM(:)'*REC_SIM(:)); % Source Scaling
             ADJ_SRC_elmt = zeros(Nyi, Nxi);
-            ADJ_SRC_elmt(ind_cur(elemInclude_cur(tx_include_cur(elmt_idx),:))) = ...
+            ADJ_SRC_elmt(ind(elemInclude(tx_include(elmt_idx),:))) = ...
                 scaling(elmt_idx)*REC_SIM - REC;
             ADJ_SRC(:,:,elmt_idx) = ADJ_SRC_elmt;
         end
@@ -446,7 +277,7 @@ for f_idx = 1:numel(fDATA)
         SCALING = repmat(reshape(scaling, [1,1,numel(scaling)]), [Nyi, Nxi, 1]);
         BACKPROJ = -real(conj(SCALING.*VIRT_SRC).*ADJ_WVFIELD);
         % Accumulate Gradient Over Each Element
-        for elmt_idx = 1:numel(tx_include_cur)
+        for elmt_idx = 1:numel(tx_include)
             % Accumulate Backprojection
             gradient_img = gradient_img + BACKPROJ(:,:,elmt_idx);
             showAnimation = false; % Show Backprojection Animation
@@ -457,10 +288,10 @@ for f_idx = 1:numel(fDATA)
                 title(['Backprojection up to Transmit ', num2str(elmt_idx)]); 
                 colorbar; colormap gray; drawnow;
                 % Source and Receiver Positions Included
-                hold on; plot(x_circ_cur(tx_include_cur(elmt_idx)), ...
-                    y_circ_cur(tx_include_cur(elmt_idx)), 'r*')
-                plot(x_circ_cur(elemInclude_cur(tx_include_cur(elmt_idx),:)), ...
-                    y_circ_cur(elemInclude_cur(tx_include_cur(elmt_idx),:)), 'y.'); 
+                hold on; plot(x_circ(tx_include(elmt_idx)), ...
+                    y_circ(tx_include(elmt_idx)), 'r*')
+                plot(x_circ(elemInclude(tx_include(elmt_idx),:)), ...
+                    y_circ(elemInclude(tx_include(elmt_idx),:)), 'y.'); 
                 drawnow; clf;
             end
         end
@@ -482,12 +313,12 @@ for f_idx = 1:numel(fDATA)
         gradient_img_prev = gradient_img;
         % Step 3: Compute Forward Projection of Current Search Direction
         PERTURBED_WVFIELD = HS.solve(VIRT_SRC.*search_dir, false); 
-        dREC_SIM = zeros(numel(tx_include_cur), numElements_cur);
-        for elmt_idx = 1:numel(tx_include_cur)
+        dREC_SIM = zeros(numel(tx_include), numElements);
+        for elmt_idx = 1:numel(tx_include)
             % Forward Projection of Search Direction Image
             PERTURBED_WVFIELD_elmt = PERTURBED_WVFIELD(:,:,elmt_idx);
-            dREC_SIM(elmt_idx,elemInclude_cur(tx_include_cur(elmt_idx),:)) = -permute(scaling(elmt_idx) * ...
-                PERTURBED_WVFIELD_elmt(ind_cur(elemInclude_cur(tx_include_cur(elmt_idx),:))),[2,1]);
+            dREC_SIM(elmt_idx,elemInclude(tx_include(elmt_idx),:)) = -permute(scaling(elmt_idx) * ...
+                PERTURBED_WVFIELD_elmt(ind(elemInclude(tx_include(elmt_idx),:))),[2,1]);
         end
         % Step 4: Perform a Linear Approximation of Exact Line Search
         perc_step_size = 1; % (<1/2) Introduced to Improve Compliance with Strong Wolfe Conditions 
