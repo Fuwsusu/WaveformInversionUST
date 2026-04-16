@@ -45,12 +45,16 @@ numElements = size(transducerPositionsXY,2);
 fsa_rf_data = single(full_dataset);
 clearvars full_dataset;
 
+% % Extract the Desired Frequency for Waveform Inversion
+% fDATA_SoS = (0.3:0.05:1.25)*(1e6); % Frequencies for SoS-only Iterations [Hz]
+% fDATA_SoSAtten = (0.325:0.05:1.275)*(1e6); % Frequencies for SoS/Attenuation Iterations [Hz]
+% fDATA = [fDATA_SoS, fDATA_SoSAtten]; % All Frequencies [Hz]
+
 % Extract the Desired Frequency for Waveform Inversion (segmented steps)
 % Low band:  0.30-0.45 MHz, step 0.025 MHz
 % Mid band:  0.50-0.70 MHz, step 0.050 MHz
 % High band: 0.775-1.25 MHz, step 0.075 MHz (force include 1.25)
-fDATA_SoS = [ (0.30:0.025:0.45), (0.50:0.05:0.70), ...
-    (0.775:0.075:1.225), 1.250 ]*(1e6); % Frequencies for SoS-only [Hz]
+fDATA_SoS = [ (0.30:0.025:0.45), (0.50:0.05:0.70), (0.775:0.075:1.225), 1.250 ]*(1e6); % Frequencies for SoS-only [Hz]
 fDATA_SoSAtten = fDATA_SoS + 25e3;      % SoS/Attenuation [Hz]
 fDATA = [fDATA_SoS, fDATA_SoSAtten];    % All Frequencies [Hz]
 
@@ -206,7 +210,7 @@ if enableVirtualElements
             y_virtual = r_base.*sin(theta_virtual);
             x_ve = reshape([x_base; x_virtual],1,[]);
             y_ve = reshape([y_base; y_virtual],1,[]);
-            isRealRx_ve = false(1, numel(x_ve)); isRealRx_ve(1:2:end) = true; %#ok<NASGU>
+            isRealRx_ve = false(1, numel(x_ve)); isRealRx_ve(1:2:end) = true;
         case 'bilateral'
             L_ve = 3;
             theta_left = theta_base - frac_shift.*dtheta_prev;
@@ -215,7 +219,7 @@ if enableVirtualElements
             y_left = r_base.*sin(theta_left); y_right = r_base.*sin(theta_right);
             x_ve = reshape([x_left; x_base; x_right],1,[]);
             y_ve = reshape([y_left; y_base; y_right],1,[]);
-            isRealRx_ve = false(1, numel(x_ve)); isRealRx_ve(2:3:end) = true; %#ok<NASGU>
+            isRealRx_ve = false(1, numel(x_ve)); isRealRx_ve(2:3:end) = true;
         otherwise
             error('Unknown virtualElementsMode: %s', virtualElementsMode);
     end
