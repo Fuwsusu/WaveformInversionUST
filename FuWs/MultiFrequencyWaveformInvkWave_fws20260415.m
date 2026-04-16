@@ -1471,96 +1471,113 @@ subplot(2,2,4); imagesc(xi_orig, yi_orig, atten, attenrange); axis image; colorb
 title('Attenuation'); xlabel('Lateral [m]'); ylabel('Axial [m]');
 
 
-%% ===================== Axial Sound Speed Profile (cutting line) =====================
-% 参考 Wu et al. (2023) Fig.17(c): 沿垂直切线对比重建声速与真实声速
-figure(5); clf;
-
-cut_x_m = 0;   % 切线的 x 坐标 [m]，默认取 x=0 中心线
-
-[~, ix_coarse] = min(abs(xi_original - cut_x_m));
-[~, ix_orig]   = min(abs(xi_orig     - cut_x_m));
-
-vel_cut_true = C(:, ix_orig);
-vel_cut_nopp = VEL_ESTIM(:, ix_coarse);
-
-plot(vel_cut_true, yi_orig,     'k-',  'LineWidth', 2.0, 'DisplayName', 'True'); hold on;
-plot(vel_cut_nopp, yi_original, 'b--', 'LineWidth', 1.5, 'DisplayName', 'NoPP');
-
-set(gca, 'YDir', 'reverse');
-xlabel('Sound Speed [m/s]'); ylabel('Axial position [m]');
-title(sprintf('Cutting line x=%.1fmm (iter=%d)', cut_x_m*1e3, iter));
-legend('Location','best'); grid on;
-xlim(crange); ylim([yi_original(1), yi_original(end)]);
-
-scriptElapsedSec = toc(scriptTimer);
-fprintf('整个脚本总时长: %.2f 秒 (%.2f 分钟)\n', scriptElapsedSec, scriptElapsedSec/60);
-
-%% ===================== Horizontal Sound Speed Profile (contour line) =====================
-% 参考 Long et al. (2023) Fig.6: 在SOS图上给出一条水平切线，
-% 对比该切线上的重建声速曲线与真实声速曲线。
-% 左图：重建图像 + 水平切线
-% 右图：沿该切线的 SOS profile
-
-figure(6); clf;
+%% ===================== X/Y Cutting-Line Layout + Separate Profiles =====================
+% 用户需求：
+% 1) 一张图同时标注 x 轴轮廓线位置（水平线）和 y 轴轮廓线位置（垂直线）
+% 2) x/y 两个方向的 profile 比较分开单独显示
+% => 总共三张图：figure(5)=切线位置；figure(6)=x向(profile)；figure(7)=y向(profile)
 
 % ------------------ 用户可调参数 ------------------
-cut_y_m = 0.01;          % 水平切线的 y 坐标 [m]，默认取 y = 0 中心线
-showStageRefs = true; % 若存在阶段参考模型，则一并画出 profile
-lineColor = [1 1 0];  % 切线颜色（黄色）
+cut_x_m = 0;      % 垂直切线 x 坐标 [m]（用于 y 轴方向 profile）
+cut_y_m = 0.01;   % 水平切线 y 坐标 [m]（用于 x 轴方向 profile）
+showStageRefs = true;              % 若存在阶段参考模型，则一并画出 profile
+lineColorX = [1 1 0];              % x向profile切线颜色（黄色，水平线）
+lineColorY = [0 1 1];              % y向profile切线颜色（青色，垂直线）
 % -------------------------------------------------
 
-% ---- 在粗网格/真值网格上分别找最接近 cut_y_m 的行 ----
+% ---- 在粗网格/真值网格上分别找最接近 cut_x_m / cut_y_m 的位置 ----
+[~, ix_coarse] = min(abs(xi_original - cut_x_m));
+[~, ix_true]   = min(abs(xi_orig     - cut_x_m));
 [~, iy_coarse] = min(abs(yi_original - cut_y_m));
 [~, iy_true]   = min(abs(yi_orig     - cut_y_m));
 
-% ---- 提取 profile ----
-vel_prof_est  = VEL_ESTIM(iy_coarse, :);
-vel_prof_true = C(iy_true, :);
+% ---- 提取 x向（水平）profile: y = cut_y_m ----
+vel_prof_x_est  = VEL_ESTIM(iy_coarse, :);
+vel_prof_x_true = C(iy_true, :);
+
+% ---- 提取 y向（垂直）profile: x = cut_x_m ----
+vel_prof_y_est  = VEL_ESTIM(:, ix_coarse);
+vel_prof_y_true = C(:, ix_true);
 
 % 若存在阶段参考模型，可选叠加
 has_stage1 = exist('VEL_stage1_ref', 'var') == 1;
 has_stage2 = exist('VEL_stage2_ref', 'var') == 1;
 
 if has_stage1
-    vel_prof_stage1 = VEL_stage1_ref(iy_coarse, :);
+    vel_prof_x_stage1 = VEL_stage1_ref(iy_coarse, :);
+    vel_prof_y_stage1 = VEL_stage1_ref(:, ix_coarse);
 end
 if has_stage2
-    vel_prof_stage2 = VEL_stage2_ref(iy_coarse, :);
+    vel_prof_x_stage2 = VEL_stage2_ref(iy_coarse, :);
+    vel_prof_y_stage2 = VEL_stage2_ref(:, ix_coarse);
 end
 
-% ------------------ 左图：图像 + 水平切线 ------------------
-subplot(1,2,1);
+% ------------------ 图1：切线位置（x线+ y线放在一张图） ------------------
+figure(5); clf;
 imagesc(xi_original, yi_original, VEL_ESTIM, crange);
 axis image; colorbar; colormap(cmap_rb);
 hold on;
+% x轴方向轮廓线（水平线）
 plot([xi_original(1), xi_original(end)], [yi_original(iy_coarse), yi_original(iy_coarse)], ...
-    '-', 'Color', lineColor, 'LineWidth', 1.5);
+    '-', 'Color', lineColorX, 'LineWidth', 1.8, ...
+    'DisplayName', sprintf('x-profile line: y = %.1f mm', yi_original(iy_coarse)*1e3));
+% y轴方向轮廓线（垂直线）
+plot([xi_original(ix_coarse), xi_original(ix_coarse)], [yi_original(1), yi_original(end)], ...
+    '-', 'Color', lineColorY, 'LineWidth', 1.8, ...
+    'DisplayName', sprintf('y-profile line: x = %.1f mm', xi_original(ix_coarse)*1e3));
 hold off;
 xlabel('Lateral [m]');
 ylabel('Axial [m]');
-title(sprintf('Estimated SOS with horizontal line (y = %.1f mm)', yi_original(iy_coarse)*1e3));
+title('Estimated SOS with x/y contour line positions');
+legend('Location', 'best');
 
-% ------------------ 右图：轮廓曲线 ------------------
-subplot(1,2,2);
-plot(xi_orig,     vel_prof_true, 'k-',  'LineWidth', 2.0, 'DisplayName', 'True'); hold on;
-plot(xi_original, vel_prof_est,  'r-',  'LineWidth', 1.8, 'DisplayName', 'Estimated');
+% ------------------ 图2：x向（水平）profile 单独比较 ------------------
+figure(6); clf;
+plot(xi_orig,     vel_prof_x_true, 'k-',  'LineWidth', 2.0, 'DisplayName', 'True'); hold on;
+plot(xi_original, vel_prof_x_est,  'r-',  'LineWidth', 1.8, 'DisplayName', 'Estimated');
 
 if showStageRefs
     if has_stage1
-        plot(xi_original, vel_prof_stage1, 'b-.', 'LineWidth', 1.3, 'DisplayName', 'Stage-1 ref');
+        plot(xi_original, vel_prof_x_stage1, 'b-.', 'LineWidth', 1.3, 'DisplayName', 'Stage-1 ref');
     end
     if has_stage2
-        plot(xi_original, vel_prof_stage2, 'm-.', 'LineWidth', 1.3, 'DisplayName', 'Stage-2 ref');
+        plot(xi_original, vel_prof_x_stage2, 'm-.', 'LineWidth', 1.3, 'DisplayName', 'Stage-2 ref');
     end
 end
 
 grid on;
 xlabel('Lateral position [m]');
 ylabel('Sound Speed [m/s]');
-title(sprintf('Horizontal SOS profile at y = %.1f mm', yi_original(iy_coarse)*1e3));
+title(sprintf('X-direction SOS profile (y = %.1f mm)', yi_original(iy_coarse)*1e3));
 legend('Location','best');
 xlim([xi_original(1), xi_original(end)]);
 ylim(crange);
+
+% ------------------ 图3：y向（垂直）profile 单独比较 ------------------
+figure(7); clf;
+plot(vel_prof_y_true, yi_orig,     'k-',  'LineWidth', 2.0, 'DisplayName', 'True'); hold on;
+plot(vel_prof_y_est,  yi_original, 'b--', 'LineWidth', 1.8, 'DisplayName', 'Estimated');
+
+if showStageRefs
+    if has_stage1
+        plot(vel_prof_y_stage1, yi_original, 'b-.', 'LineWidth', 1.3, 'DisplayName', 'Stage-1 ref');
+    end
+    if has_stage2
+        plot(vel_prof_y_stage2, yi_original, 'm-.', 'LineWidth', 1.3, 'DisplayName', 'Stage-2 ref');
+    end
+end
+
+set(gca, 'YDir', 'reverse');
+grid on;
+xlabel('Sound Speed [m/s]');
+ylabel('Axial position [m]');
+title(sprintf('Y-direction SOS profile (x = %.1f mm, iter=%d)', xi_original(ix_coarse)*1e3, iter));
+legend('Location', 'best');
+xlim(crange);
+ylim([yi_original(1), yi_original(end)]);
+
+scriptElapsedSec = toc(scriptTimer);
+fprintf('整个脚本总时长: %.2f 秒 (%.2f 分钟)\n', scriptElapsedSec, scriptElapsedSec/60);
 
 %% ===================== Quantitative Metrics (PSNR / RMSE / SSIM / RD) =====================
 % 说明：
