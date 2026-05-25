@@ -1006,6 +1006,8 @@ prev_ring_k      = nan;
 prev_clf_k       = nan;
 prev_pred_drop   = nan;
 prev_edge_contam = nan;
+% [新增] 追踪上一轮 misfit 类型，用于检测同阶段内的切换
+prev_misfitType_iter_track = '';
 % -----------------------------------------------
 
 % perc_step_size 移至主循环外
@@ -1228,6 +1230,32 @@ for f_idx = 1:numel(fDATA)
         % 完整迭代链选择
         useL2OriginalChain = useOriginalVEChainForL2 && strcmpi(misfitType_cur, 'L2');
         usePolarPhaseChain = strcmpi(misfitType_cur, 'PolarPhase');
+
+        % ================================================================
+        % [新增] misfit 类型切换检测：同阶段内 L2↔PolarPhase 切换时强制 reset CG
+        % 原因：两种 misfit 梯度量纲不同，beta 内积无物理意义；
+        %       phi_k 量级跳变会触发 TrustGate 误判；
+        %       旧 search_dir 的量纲也与新 misfit 线搜索不兼容。
+        % ================================================================
+        misfitTypeChangedNow = ~isempty(prev_misfitType_iter_track) && ...
+            ~strcmpi(misfitType_cur, prev_misfitType_iter_track) && ...
+            ~do_reset_CG;   % 已经 reset 过的（频率切换时）不重复处理
+
+        if misfitTypeChangedNow
+            search_dir        = zeros(Nyi, Nxi);
+            gradient_img_prev = zeros(Nyi, Nxi);
+            prev_phi_k        = nan;
+            prev_tau_k        = nan;
+            prev_ring_k       = nan;
+            prev_clf_k        = nan;
+            prev_pred_drop    = nan;
+            prev_edge_contam  = nan;
+            do_reset_CG       = true;   % 确保下面 CG 步骤中 beta = 0
+            fprintf('  [MisfitSwitch] %s → %s @ f=%.3f MHz，强制 reset CG + 监控量\n', ...
+                prev_misfitType_iter_track, misfitType_cur, fDATA(f_idx)/1e6);
+        end
+        prev_misfitType_iter_track = misfitType_cur;
+        % ================================================================
 
         % 当前显示标签
         if usePolarPhaseChain
