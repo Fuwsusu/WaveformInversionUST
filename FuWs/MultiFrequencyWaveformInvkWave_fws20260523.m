@@ -180,7 +180,7 @@ misfitFreqTol_Hz = 1.0;  % 频率匹配容差 [Hz]，避免浮点边界误差
 
 % Stage1 SoS-only
 enableMisfitFreqSchedule_SoSOnly = true;
-misfitFreqRanges_SoSOnly = {[0.300e6, 0.400e6], 'L2';};
+misfitFreqRanges_SoSOnly = {[0.300e6, 0.375e6], 'L2';};
 misfitFreqPoints_SoSOnly = {};
 
 % Stage2 SoS子迭代 
@@ -1006,6 +1006,7 @@ prev_ring_k      = nan;
 prev_clf_k       = nan;
 prev_pred_drop   = nan;
 prev_edge_contam = nan;
+prev_misfitType_iter_track = '';
 % -----------------------------------------------
 
 % perc_step_size 移至主循环外
@@ -1124,6 +1125,8 @@ for f_idx = 1:numel(fDATA)
             prev_edge_contam  = nan;
         end
 
+        misfitSwitchAlphaDamp = 1.0;
+
         if iter_f_idx == 1
             prev_VE_flag = VE_flags(f_idx);
         end
@@ -1224,6 +1227,35 @@ for f_idx = 1:numel(fDATA)
                     misfitFreqPoints_SoSAtten_Att, misfitFreqTol_Hz);
             if isMisfitOverrideCur, misfitOverrideStageCur = 'Stage2-Atten'; end
         end
+
+        % [新增] misfit 类型切换检测：L2 ↔ PolarPhase 显式边界处理
+        % 1) 若频率/阶段边界已触发 do_reset_CG，则不重复 reset，仅打印日志
+        % 2) 若尚未触发 reset，则强制清空 CG 历史与监控量，避免跨类型继承
+        misfitTypeChangedNow = ~isempty(prev_misfitType_iter_track) && ...
+            ~strcmpi(misfitType_cur, prev_misfitType_iter_track);
+
+        if misfitTypeChangedNow
+            if ~do_reset_CG
+                search_dir        = zeros(Nyi, Nxi);
+                gradient_img_prev = zeros(Nyi, Nxi);
+                prev_phi_k        = nan;
+                prev_tau_k        = nan;
+                prev_ring_k       = nan;
+                prev_clf_k        = nan;
+                prev_pred_drop    = nan;
+                prev_edge_contam  = nan;
+                do_reset_CG       = true;
+                reset_reason_str  = 'extra reset';
+            else
+                reset_reason_str  = 'already reset by freq/stage boundary';
+            end
+
+            misfitSwitchAlphaDamp = 0.60;
+            fprintf('  [MisfitSwitch] %s -> %s @ f=%.3f MHz | %s\n', ...
+                prev_misfitType_iter_track, misfitType_cur, fDATA(f_idx)/1e6, reset_reason_str);
+        end
+
+        prev_misfitType_iter_track = misfitType_cur;
 
         % 完整迭代链选择
         useL2OriginalChain = useOriginalVEChainForL2 && strcmpi(misfitType_cur, 'L2');
@@ -1766,6 +1798,7 @@ for f_idx = 1:numel(fDATA)
             end
         end
         alpha_gate = min(alpha_gate, alpha_gate_xf);
+        alpha_gate = min(alpha_gate, misfitSwitchAlphaDamp);
         alpha = alpha * alpha_gate;
 
         % 高频外环步长阻尼
