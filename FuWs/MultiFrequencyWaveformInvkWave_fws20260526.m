@@ -106,7 +106,7 @@ enableVirtualElements = true;          % true=启用虚拟阵元；false=原始1
 useVirtualTx          = false;         % true=虚拟阵元也参与发射；false=仅真实Tx
 virtualElementsMode   = 'unilateral';  % 'unilateral' = 单侧交替（128→256）
                                        % 'bilateral'  = 两侧对称（128→384）
-verTag                = 'V_ours_011_noCap_wLS';  % 保存版本号（wLS=加权自洽线搜索）
+verTag                = 'V_ours_012_softCap_wLS';  % 保存版本号（softCap=宽松安全上限）
 % ----------------------------------------------------------------------
 
 % ------------------ fws: 邻频高斯平滑衔接（f_k -> f_{k+1}） ------------------
@@ -281,11 +281,12 @@ end
 % 2) PolarPhase：保留文本1的平方权重 ΔA / Δφ 自洽线搜索，
 %    即残差层面加权后取平方范数，分子/分母均使用 (1-α)^2 与 α^2，
 %    且通道权重 w_sr 与 ADJ_SRC 中 w_channel 保持一致。
-% 3) [修改] 删除 max|Δv| 人工夹紧：
-%    不再使用 enableStepCap / target_dv_per_iter / auto_dv_ratio / alpha_cap / alpha_floor；
-%    max|Δv| 仅作为日志诊断量，不参与步长控制。
-% 4) 若 alpha_ls 非法或非正，则本轮 alpha=0，跳过模型更新，不再强行给 alpha_floor。
+% 3) [修改] 恢复宽松版 StepCap 安全网（仅防灾难性大步）：
+%    auto_dv_ratio 表示单次更新允许的最大相对步长（相对当前声速场 max|v|）；
+%    当 alpha_ls 导致 max|Δv| 超限时，仅按比例缩小 alpha，不改变方向。
+% 4) 若 alpha_ls 非法或非正，则本轮 alpha=0，跳过模型更新。
 optimizerType      = 'CG_PR_FR';  % 目前支持: 'CG_PR_FR'
+auto_dv_ratio      = 0.10;        % 宽松安全上限：max|Δv| <= 0.10 * max|v|（约150 m/s量级）
 % --------------------------------------------------------------
 
 % ------------------ fws: VE通道置信度加权（方向A2）------------------
@@ -1659,14 +1660,24 @@ for f_idx = 1:numel(fDATA)
             alpha_ls = -num_pp / (den_pp + eps);
         end
 
-        % 步长处理（无 StepCap）
-        % [修改] 按文本2逻辑删除 max|Δv| 人工夹紧：
-        %        alpha 直接采用当前线搜索结果 alpha_ls；
-        %        max|Δv| 仅用于日志诊断，不再反向限制 alpha。
+        % 步长处理（宽松 StepCap 安全网）
+        % [修改] 恢复 auto_dv_ratio 仅作为灾难性大步上限，不干预正常收敛。
         alpha = alpha_ls;
 
         if ~isfinite(alpha) || (alpha <= 0)
             alpha = 0;
+        else
+            if updateAttenuation
+                dmodel_tmp = slow2vel(updateMat_acoustic(gradient_img, c0));
+            else
+                dmodel_tmp = updateMat_acoustic(gradient_img, c0);
+            end
+            max_dv_pred = max(abs(alpha .* dmodel_tmp(:)));
+            v_ref_scale = max(abs(VEL_ESTIM(:)));
+            dv_cap = auto_dv_ratio * v_ref_scale;
+            if isfinite(max_dv_pred) && isfinite(dv_cap) && (max_dv_pred > dv_cap) && (max_dv_pred > 0)
+                alpha = alpha * (dv_cap / max_dv_pred);
+            end
         end
 
         % 跨频一致性度量
